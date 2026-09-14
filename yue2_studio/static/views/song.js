@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, STAGE_NAMES, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, jobTitle, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, toast, toastError } from "../ui.js";
 
 export async function songView({ el, param, app }) {
   let job;
@@ -20,7 +20,8 @@ export async function songView({ el, param, app }) {
   if (abc) renderScore(scoreEl, abc);
   const player = scorePlayer(() => scoreEl._visual);
   const styleIn = h("textarea", { id: "s-style", rows: 2 }, p.style || "");
-  const seedIn = h("input", { id: "s-seed", type: "number", min: 0, max: 2147483647, value: job.seed });
+  // Regenerate inherits the parent's seed when blank; the toggle (off by default) opts into a fresh random one.
+  const seedIn = seedField({ id: "s-seed", seed: job.seed, random: false, randomLabel: "Random seed (instead of inheriting)" });
   const presets = presetPicker({ preset: job.preset, precision: job.precision, ode_steps: job.ode_steps }, app.status && app.status.presets);
   const regenBtn = h("button", { class: "primary", onclick: regenerate }, "Regenerate from this score");
   const countIn = h("input", { id: "s-count", type: "number", min: 2, max: 16, value: 3, style: "width:70px" });
@@ -32,7 +33,8 @@ export async function songView({ el, param, app }) {
     if (p.cot === "off") toast("Parent used mode “off”; the server will regenerate with mode melody", "info");
     regenBtn.disabled = true;
     try {
-      const style = styleIn.value.trim(), seedRaw = seedIn.value.trim(), seed = seedRaw === "" ? null : Number(seedRaw);
+      // RegenerateParams: seed null = inherit parent, so a random seed must be rolled client-side.
+      const style = styleIn.value.trim(), seed = seedIn.isRandom() ? randomSeed() : seedIn.value();
       await api.submit({ kind: "regenerate", ...presets.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
       toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = "#/queue";
     } catch (e) { toastError(e); regenBtn.disabled = false; }
@@ -83,7 +85,7 @@ export async function songView({ el, param, app }) {
             : h("p", { class: "muted" }, "No score for this song (mode off or planning did not finish)."),
           h("div", { class: "panel stack" },
             h("label", { class: "field" }, h("span", { class: "lbl" }, "Style (optional edit)"), styleIn),
-            h("div", { class: "grid2 stack-narrow" }, h("label", { class: "field" }, h("span", { class: "lbl" }, "Seed"), seedIn), h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets)),
+            h("div", { class: "grid2 stack-narrow" }, h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), seedIn), h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets)),
             h("div", { class: "row" }, regenBtn, h("span", { class: "spacer" }), h("label", { class: "row", style: "gap:6px" }, countIn, varBtn)),
             h("p", { class: "hint" }, "Regenerate keeps the lyrics and mode; variations start from a fresh random seed. ", h("a", { href: `#/create?from=${job.id}` }, "Open in Create")))),
         transcription ? h("section", { class: "stack" }, h("h3", {}, "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null),

@@ -150,5 +150,29 @@ export function rememberGroup(group, jobs) {
 }
 export const groupLabel = (gid) => { const g = store.get("groups", {})[gid]; return g ? (typeof g === "string" ? g : g.label) : null; };
 
+/**
+ * Seed input with a "Random" toggle. When random is on the input is disabled and value() is null
+ * (server picks the seed); when off the field is editable and 🎲 rolls a value client-side.
+ */
+export function seedField({ id, seed = "", random = true, onChange = null, randomLabel = "Random" } = {}) {
+  const input = h("input", { id, type: "number", min: 0, max: 2147483647, step: 1, value: seed === null ? "" : seed, placeholder: "random", "aria-label": "Seed" });
+  const dice = h("button", { type: "button", class: "icon", title: "Roll a seed", "aria-label": "Roll a random seed", onclick: () => { input.value = randomSeed(); fire(); } }, "🎲");
+  const toggle = h("input", { id: id + "-random", type: "checkbox", checked: !!random, onchange: () => { sync(); fire(); } });
+  const el = h("div", { class: "stack", style: "gap:6px" },
+    h("div", { class: "row nowrap" }, input, dice),
+    h("label", { class: "check small", title: "Let the server pick a fresh seed for every submit" }, toggle, randomLabel));
+  const sync = () => { input.disabled = toggle.checked; dice.disabled = toggle.checked; input.placeholder = toggle.checked ? "random" : "e.g. 1234"; el.classList.toggle("is-random", toggle.checked); };
+  const fire = () => onChange && onChange(el.value(), toggle.checked);
+  input.addEventListener("input", fire);
+  el.input = input; el.toggle = toggle;
+  el.isRandom = () => toggle.checked;
+  el.value = () => (toggle.checked || input.value.trim() === "" ? null : Number(input.value));
+  el.raw = () => (input.value.trim() === "" ? "" : Number(input.value)); // for persistence
+  el.setRandom = (on) => { toggle.checked = !!on; sync(); };
+  el.setSeed = (n) => { toggle.checked = false; input.value = n; sync(); };
+  sync();
+  return el;
+}
+
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 export const confirmDialog = (msg) => window.confirm(msg);

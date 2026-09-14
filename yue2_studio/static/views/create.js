@@ -1,12 +1,12 @@
 import { api } from "../api.js";
-import { fill, h, presetPicker, randomSeed, rememberGroup, store, toast, toastError } from "../ui.js";
+import { fill, h, presetPicker, rememberGroup, seedField, store, toast, toastError } from "../ui.js";
 import { liveCard, resultCard } from "./jobcard.js";
 
 const RECENT_MAX = 20;
 
 const GENRES = ["pop, female vocal, upbeat", "lo-fi hip hop", "orchestral cinematic", "indie rock, male vocal", "jazz trio", "edm, synth", "warm piano ballad", "city pop, groovy bass"];
 const SECTIONS = ["[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Bridge]", "[Interlude]", "[Outro]"];
-const DEFAULTS = { title: "", style: "", lyrics: "", cot: "full", seed: "", cfg_scale: "", abc: "", count: 1, random_seeds: false, preset: "quality", precision: "8bit", ode_steps: 16 };
+const DEFAULTS = { title: "", style: "", lyrics: "", cot: "full", seed: "", random_seed: true, cfg_scale: "", abc: "", count: 1, random_seeds: false, preset: "quality", precision: "8bit", ode_steps: 16 };
 
 export async function createView({ el, query, app }) {
   const saved = { ...DEFAULTS, ...store.get("create", {}) };
@@ -15,7 +15,7 @@ export async function createView({ el, query, app }) {
     try {
       const { job } = await api.job(query.from);
       Object.assign(saved, { title: job.params.title || "", style: job.params.style || "", lyrics: job.params.lyrics || "", cot: job.params.cot || "full",
-        seed: job.seed, cfg_scale: job.params.cfg_scale ?? "", abc: job.params.abc || "", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, count: 3 });
+        seed: job.seed, random_seed: false, cfg_scale: job.params.cfg_scale ?? "", abc: job.params.abc || "", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, count: 3 });
       toast(`Prefilled from ${job.title || job.id.slice(0, 8)} — set Variations and submit`, "info");
     } catch (e) { toastError(e); }
   }
@@ -24,7 +24,7 @@ export async function createView({ el, query, app }) {
     title: h("input", { id: "f-title", type: "text", value: saved.title, placeholder: "Optional display title", autocomplete: "off" }),
     style: h("textarea", { id: "f-style", rows: 2, placeholder: "e.g. dreamy indie pop, female vocal, warm guitars, 96 BPM", required: true }, saved.style),
     lyrics: h("textarea", { id: "f-lyrics", class: "lyrics", placeholder: "[Verse]\nfirst line…\n\n[Chorus]\n…", required: true }, saved.lyrics),
-    seed: h("input", { id: "f-seed", type: "number", min: 0, max: 2147483647, step: 1, value: saved.seed, placeholder: "random" }),
+    seed: seedField({ id: "f-seed", seed: saved.seed, random: saved.random_seed !== false, onChange: () => { collect(); updateCount(); } }),
     cfg: h("input", { id: "f-cfg", type: "number", min: 0, max: 20, step: 0.1, value: saved.cfg_scale, placeholder: "engine default" }),
     abc: h("textarea", { id: "f-abc", class: "mono", rows: 8, placeholder: "X:1\nT:\nM:4/4\nL:1/16\nK:C\n…" }, saved.abc),
     count: h("input", { id: "f-count", type: "number", min: 1, max: 16, step: 1, value: saved.count }),
@@ -43,7 +43,7 @@ export async function createView({ el, query, app }) {
     } })), f.abc);
   const submit = h("button", { type: "submit", class: "primary", id: "f-submit" }, "Create song");
   const variationsHint = h("span", { class: "hint" });
-  const updateCount = () => { const n = Number(f.count.value) || 1; submit.textContent = n > 1 ? `Create ${n} variations` : "Create song"; variationsHint.textContent = n > 1 ? "Submitted as one group; seeds " + (f.random.checked ? "random" : "seed, seed+1, …") : ""; };
+  const updateCount = () => { const n = Number(f.count.value) || 1; submit.textContent = n > 1 ? `Create ${n} variations` : "Create song"; variationsHint.textContent = n > 1 ? "Submitted as one group; seeds " + (f.random.checked || f.seed.isRandom() ? "independent random" : "seed, seed+1, …") : ""; };
   f.count.addEventListener("input", updateCount); f.random.addEventListener("change", updateCount); updateCount();
 
   const insertTag = (tag) => { const t = f.lyrics, s = t.selectionStart, v = t.value; const pre = v.slice(0, s), post = v.slice(t.selectionEnd); const nl = !pre ? "" : pre.endsWith("\n\n") ? "" : pre.endsWith("\n") ? "\n" : "\n\n"; t.value = pre + nl + tag + "\n" + post; t.focus(); t.selectionStart = t.selectionEnd = (pre + nl + tag + "\n").length; };
@@ -61,7 +61,7 @@ export async function createView({ el, query, app }) {
         h("span", { class: "hint" }, "full = plan score + arrangement, melody = plan melody only, off = no score")),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
       h("div", { class: "grid2" },
-        h("label", { class: "field" }, h("span", { class: "lbl" }, "Seed"), h("div", { class: "row nowrap" }, f.seed, h("button", { type: "button", class: "icon", title: "Random seed", "aria-label": "Random seed", onclick: () => { f.seed.value = randomSeed(); } }, "🎲"))),
+        h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
         h("label", { class: "field" }, h("span", { class: "lbl" }, "CFG scale"), f.cfg)),
       h("div", { class: "grid2" },
         h("label", { class: "field" }, h("span", { class: "lbl" }, "Variations"), f.count),
@@ -81,7 +81,7 @@ export async function createView({ el, query, app }) {
   function clearResults() { live.forEach((c) => c.close()); live.clear(); setRecent([]); fill(results); resultsEmpty.hidden = false; resultsHead.querySelector("button").hidden = true; }
   function dismiss(job) { setRecent(recent().filter((id) => id !== job.id)); const el = results.querySelector(`[data-id="${job.id}"]`); el && el.remove(); const c = live.get(job.id); if (c) { c.close(); live.delete(job.id); } syncEmpty(); }
   function syncEmpty() { const n = results.children.length; resultsEmpty.hidden = n > 0; resultsHead.querySelector("button").hidden = n === 0; }
-  function useSeed(job) { f.seed.value = job.seed; collect(); f.seed.focus(); toast(`Seed ${job.seed} copied into the form`, "info", { timeout: 2500 }); }
+  function useSeed(job) { f.seed.setSeed(job.seed); collect(); f.seed.input.focus(); toast(`Seed ${job.seed} copied into the form (random seed off)`, "info", { timeout: 2500 }); }
   const doneCard = (job) => resultCard(job, { onUseSeed: useSeed, onDismiss: dismiss });
   /** Show a job in the results column (prepend unless `replace` gives an existing node). */
   function show(job, replace = null) {
@@ -108,7 +108,7 @@ export async function createView({ el, query, app }) {
   const tick = setInterval(() => live.forEach((c) => c.paint()), 1000);
 
   function collect() {
-    const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, cot, seed: f.seed.value === "" ? "" : Number(f.seed.value),
+    const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, cot, seed: f.seed.raw(), random_seed: f.seed.isRandom(),
       cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), abc: f.abc.value, count: Math.max(1, Number(f.count.value) || 1), random_seeds: f.random.checked, ...presets.value() };
     store.set("create", v);
     return v;
@@ -120,13 +120,13 @@ export async function createView({ el, query, app }) {
     const v = collect();
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     if (v.abc.trim() && v.cot === "off") return toast("An ABC score cannot be used with mode “off” — pick full or melody", "err");
-    const base = { style: v.style, lyrics: v.lyrics, cot: v.cot, seed: v.seed === "" ? null : v.seed, cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale, abc: v.abc.trim() || null, title: v.title || null };
+    const base = { style: v.style, lyrics: v.lyrics, cot: v.cot, seed: f.seed.value(), cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale, abc: v.abc.trim() || null, title: v.title || null };
     const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps };
     submit.disabled = true;
     try {
       let jobs;
       if (v.count > 1) {
-        const r = await api.submit({ kind: "variations", params: { count: v.count, base, random_seeds: v.random_seeds, label: null }, ...common });
+        const r = await api.submit({ kind: "variations", params: { count: v.count, base, random_seeds: v.random_seeds || v.random_seed, label: null }, ...common });
         rememberGroup(r.group, r.jobs); jobs = r.jobs;
         toast(`Queued ${r.jobs.length} variations`, "ok");
       } else {

@@ -181,3 +181,6 @@ pre.lyrics-block { white-space: pre-wrap; overflow-wrap: anywhere; font-family: 
 .selbar { position: sticky; top: 49px; z-index: 5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 12px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px; box-shadow: var(--shadow); }
 .card input.sel { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--accent); cursor: pointer; }
 .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+input:disabled, button:disabled { opacity: .55; }
+.check.small { font-size: 12px; color: var(--muted); }

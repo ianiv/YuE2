@@ -52,7 +52,9 @@ light/dark theme (overridable in Settings).
 | `melody` | Plans only the vocal melody line, then generates audio. |
 | `off` | No score planning; audio is generated straight from style + lyrics. Fastest, loosest. |
 
-Pick a preset (below), a seed (blank = random; 🎲 rolls one), an optional CFG scale, and
+Pick a preset (below), a seed (**Random seed** is on by default so the server picks a fresh one
+per submit — untick it to type or 🎲-roll a fixed seed; *Use this seed* on a result does that for
+you), an optional CFG scale, and
 optionally paste an ABC score to generate from (requires `full` or `melody`). Set **Variations**
 to N > 1 to submit N jobs at once with seeds `seed, seed+1, …` (or independent random seeds);
 they are grouped in the queue and library.
