@@ -398,12 +398,13 @@ class Worker:
 
     def _run_job(self, job: Job) -> None:
         with self._lock:
+            if self._stopping:
+                return  # stop() raced the dequeue: leave the row queued for the next start
             cancel = self._cancels.setdefault(job.id, threading.Event())
-        if not self.store.update_status(job.id, "running", expected="queued"):
-            with self._lock:
+            if not self.store.update_status(job.id, "running", expected="queued"):
                 self._cancels.pop(job.id, None)
-            return  # cancelled between dequeue and start
-        self.current_job_id = job.id
+                return  # cancelled between dequeue and start
+            self.current_job_id = job.id  # under _lock so stop() sees it together with its Event
         job = self.store.get(job.id)
         song_dir = self.paths.songs_dir / job.id
         song_dir.mkdir(parents=True, exist_ok=True)
