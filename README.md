@@ -229,6 +229,8 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
 
 ## Licences and attribution
 
+- **YuE2 Studio itself** (this repository's code) is released under the [MIT License](LICENSE).
+  The model weights and other components below are separate works with their own licences.
 - The **YuE2-3B model weights** ([m-a-p/YuE2-3B](https://huggingface.co/m-a-p/YuE2-3B), and the
   MLX conversion [vanch007/mlx-Yue2-3B](https://huggingface.co/vanch007/mlx-Yue2-3B)) are released
   under **[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — non-commercial use
