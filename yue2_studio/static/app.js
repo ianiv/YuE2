@@ -1,6 +1,6 @@
 // Router, header status, theme.
 import { api } from "./api.js";
-import { applyTheme, fill, h, store } from "./ui.js";
+import { applyTheme, fill, h, stopPlayback, store } from "./ui.js";
 import { createView } from "./views/create.js";
 import { queueView } from "./views/queue.js";
 import { libraryView } from "./views/library.js";
@@ -43,6 +43,7 @@ async function route() {
   const gen = ++routeGen;
   if (current && current.unmount) { try { current.unmount(); } catch (e) { console.error(e); } }
   current = null;
+  stopPlayback(); // the outgoing view's players are about to leave the DOM
   document.querySelectorAll("nav.main a").forEach((a) => {
     const active = a.getAttribute("href") === `#/${name}` || (name === "song" && a.getAttribute("href") === "#/library");
     if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");

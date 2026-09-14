@@ -102,12 +102,27 @@ export function clearScore(el) {
   clear(el);
 }
 
+// One thing plays at a time. Any <audio> starting (native controls or play()) pauses every other
+// <audio> and stops the MIDI preview; the MIDI preview starting pauses every <audio>. Paused media
+// keeps its position so the user can resume it. Media events do not bubble, hence the capture listener.
+let midiPlayer = null;
+/** Pause every <audio>/<video> and stop the MIDI preview, except `except` (an element or the MIDI button). */
+export function stopPlayback(except = null) {
+  for (const m of document.querySelectorAll("audio, video")) if (m !== except && !m.paused) m.pause();
+  if (midiPlayer && midiPlayer !== except) midiPlayer.stop();
+}
+document.addEventListener("play", (e) => stopPlayback(e.target), true);
+
 /** Minimal MIDI preview via abcjs' synth. Returns a toggle button. */
 export function scorePlayer(getVisual) {
   let synth = null, playing = false;
   const btn = h("button", { onclick: toggle }, "▶ Play score (MIDI)");
+  function setPlaying(on) {
+    playing = on; btn.textContent = on ? "■ Stop" : "▶ Play score (MIDI)";
+    if (on) midiPlayer = btn; else if (midiPlayer === btn) midiPlayer = null;
+  }
   async function toggle() {
-    if (playing) { synth && synth.stop(); playing = false; btn.textContent = "▶ Play score (MIDI)"; return; }
+    if (playing) { synth && synth.stop(); setPlaying(false); return; }
     const visual = getVisual();
     if (!visual || !window.ABCJS || !ABCJS.synth || !ABCJS.synth.supportsAudio()) return toast("Audio synthesis is not supported in this browser", "err");
     btn.disabled = true; btn.textContent = "Loading sounds…";
@@ -115,9 +130,11 @@ export function scorePlayer(getVisual) {
       synth = new ABCJS.synth.CreateSynth();
       await synth.init({ visualObj: visual, millisecondsPerMeasure: visual.millisecondsPerMeasure() });
       await synth.prime();
-      synth.start(); playing = true; btn.textContent = "■ Stop";
-      setTimeout(() => { if (playing) { playing = false; btn.textContent = "▶ Play score (MIDI)"; } }, (synth.duration || 30) * 1000 + 300);
-    } catch (e) { toast("Could not play score: " + e.message, "err"); }
+      stopPlayback(btn);
+      synth.start(); setPlaying(true);
+      const mine = synth;
+      setTimeout(() => { if (playing && synth === mine) setPlaying(false); }, (synth.duration || 30) * 1000 + 300);
+    } catch (e) { toast("Could not play score: " + e.message, "err"); setPlaying(false); }
     btn.disabled = false;
   }
   btn.stop = () => { if (playing) toggle(); };
