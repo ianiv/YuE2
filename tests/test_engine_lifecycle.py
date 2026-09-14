@@ -52,6 +52,8 @@ class FakePipeline:
         return {"generation": {"ode_steps": self.generation_config.ode_steps}}
 
     def plan(self, **kwargs):
+        # Mirror StudioPipeline._status, which accumulates seconds by label for the pipeline's lifetime.
+        self.stage_timings["Planning score"] = self.stage_timings.get("Planning score", 0.0) + 1.0
         if self.latch_on_plan is not None:
             self.latched = self.latch_on_plan
         if self.plan_error is not None:
@@ -108,6 +110,18 @@ def test_cancellation_with_latched_guard_discards_pipeline(engine, tmp_path):
         engine.create_song(REQUEST, tmp_path / "a", options=options)
     assert pipe.closed
     assert engine.state == "cold"
+
+
+def test_stage_timings_reset_between_jobs_on_resident_pipeline(engine, tmp_path):
+    options = config.resolve_preset("fast")
+    engine.ensure(options)
+    pipe = engine.pipeline
+    pipe.plan_error = InterruptedError("Cancelled during abc")  # keeps the pipeline resident
+    for name in ("a", "b"):
+        with pytest.raises(InterruptedError):
+            engine.create_song(REQUEST, tmp_path / name, options=options)
+    assert engine.pipeline is pipe
+    assert pipe.stage_timings == {"Planning score": 1.0}  # not 2.0: reset at the top of each job
 
 
 def test_precision_change_rebuilds_but_ode_steps_does_not(engine):

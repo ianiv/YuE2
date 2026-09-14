@@ -366,9 +366,16 @@ class Engine:
                                     options=options, cancelled=cancelled)
 
     def _run_create(self, pipe, fields: dict, generation: dict, abc_sampling, semantic_sampling,
-                    out_dir: Path, *, options: EngineOptions, cancelled: Cancelled | None) -> dict:
-        """Stage body shared by ``create_song`` and ``cover_song``; caller holds ``_busy``."""
+                    out_dir: Path, *, options: EngineOptions, cancelled: Cancelled | None,
+                    extra_stages: dict[str, float] | None = None) -> dict:
+        """Stage body shared by ``create_song`` and ``cover_song``; caller holds ``_busy``.
+
+        ``_status`` accumulates seconds by label for the pipeline's lifetime, so the per-job stage
+        timings are reset here; ``extra_stages`` (e.g. the cover's transcription stage) is merged
+        into the reported ``timing["stages"]``.
+        """
         song_dir, plan_dir = out_dir / "song", out_dir / "plan"
+        pipe.stage_timings = {}
         pipe.generation_config = GenerationConfig.from_dict({**generation, "ode_steps": options.ode_steps})
         observer = pipe.token_observer()
         pipe.check_execution()
@@ -394,7 +401,8 @@ class Engine:
         timing = {
             "abc": plan.timing, "semantic": semantic.timing, "nar_seconds": nar_seconds,
             "vae_seconds": time.perf_counter() - vae_start, "load": dict(pipe.load_timing),
-            "e2e_seconds": time.perf_counter() - start, "stages": dict(pipe.stage_timings),
+            "e2e_seconds": time.perf_counter() - start,
+            "stages": {**(extra_stages or {}), **pipe.stage_timings},
         }
         result = SongResult(audio, SAMPLE_RATE, semantic, latents, effective, pipe.weights, timing,
                             request_id, noise)
@@ -471,6 +479,7 @@ class Engine:
             pipe.check_execution()
             _clear_gpu()
             transcription_seconds = time.perf_counter() - started
+            transcription_stages = dict(pipe.stage_timings)  # _run_create resets the per-job timings
             if transcription["status"] != "complete" or transcription["truncated"]:
                 raise ValueError("Transcription is incomplete; inspect its artifacts before using the score")
             score = (transcription_dir / "score.abc").read_bytes().decode("utf-8")
@@ -484,7 +493,8 @@ class Engine:
                 song_request["semantic_sampling"] = semantic_sampling
             write_json(out_dir / "request.json", song_request)
             summary = self._run_create(pipe, song_fields, generation, abc_sampling, semantic_sampling,
-                                       out_dir, options=options, cancelled=cancelled)
+                                       out_dir, options=options, cancelled=cancelled,
+                                       extra_stages=transcription_stages)
         summary["transcription"] = {
             "dir": str(transcription_dir), "task": task, "seconds": transcription_seconds,
             "source_audio_sha256": transcription["source_audio_sha256"],
