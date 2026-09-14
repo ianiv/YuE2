@@ -169,3 +169,10 @@ pre.block { margin: 0; padding: 10px; background: var(--surface-2); border-radiu
 .toast { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-left: 4px solid var(--info); border-radius: var(--radius); padding: 10px 12px; box-shadow: var(--shadow); font-size: 13px; display: flex; gap: 10px; align-items: flex-start; }
 .toast.err { border-left-color: var(--err); } .toast.ok { border-left-color: var(--ok); }
 .toast button { margin-left: auto; }
+
+/* create: form | results */
+.cols.results-layout { grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); }
+@media (max-width: 760px) { .cols.results-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 761px) { .results-col { position: sticky; top: 60px; max-height: calc(100vh - 76px); overflow-y: auto; padding-right: 2px; } }
+.results-col .card audio { margin-top: 2px; }
+pre.lyrics-block { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font); font-size: 14px; line-height: 1.5; max-height: none; }

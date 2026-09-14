@@ -57,6 +57,12 @@ optionally paste an ABC score to generate from (requires `full` or `melody`). Se
 to N > 1 to submit N jobs at once with seeds `seed, seed+1, …` (or independent random seeds);
 they are grouped in the queue and library.
 
+Create is the iteration page: submitting keeps you on it with the form intact, and the job appears
+in the **Results** column beside the form — live progress and the streaming score while it runs,
+then an inline player the moment it finishes, with *Use this seed* and *Regenerate from its score*
+shortcuts. Recent results persist across reloads (last 20); the Queue and Library still show
+everything.
+
 **Queue** (`#/queue`) — live cards for queued and running jobs: stage, progress, tokens/s, ETA,
 the ABC score streaming in while it is being planned, and a cancel button. Jobs run one at a time
 (the GPU allows one workload per process); cancelling a running job stops it at the next token /
@@ -65,8 +71,9 @@ ODE step / decode chunk and the worker moves on.
 **Library** (`#/library`) — finished songs with inline players, duration, preset, seed, mode and
 group badges; filters by kind, group and text; failed/cancelled jobs listed separately; delete; download FLAC / MP3 / `artifacts.zip`.
 
-**Song detail** (`#/song/<id>`) — player, the request, per-stage timing, and the score rendered
-with abcjs next to an editable ABC textarea. **Regenerate from this score** submits a `regenerate`
+**Song detail** (`#/song/<id>`) — player, the request (style and the full lyrics, shown expanded
+under the player), per-stage timing, and the score rendered with abcjs next to an editable ABC
+textarea. **Regenerate from this score** submits a `regenerate`
 job that keeps the lyrics and seed (style editable) and generates audio from your edited score; the
 result links back to its parent. **More variations** pre-fills Create with this song's request.
 Covers additionally show the transcribed score. **▶ Play score (MIDI)** previews the score with
