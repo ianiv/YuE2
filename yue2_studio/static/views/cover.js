@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, fmt, h, presetPicker, randomSeed, store, toast, toastError } from "../ui.js";
+import { fill, fmt, h, presetPicker, seedField, store, toast, toastError } from "../ui.js";
 
 const TASKS = [["melody-full", "Melody → full", "Transcribe the melody, let YuE2 write the full arrangement. Recommended for covers."],
   ["melody-vocal", "Melody → vocal", "Transcribe the melody and follow it with the vocal line only."],
@@ -7,7 +7,7 @@ const TASKS = [["melody-full", "Melody → full", "Transcribe the melody, let Yu
 const ACCEPT = ".mp3,.wav,.flac,.m4a,.ogg";
 
 export async function coverView({ el, app }) {
-  const saved = store.get("cover", { style: "", lyrics: "", task: "melody-full", seed: "", title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16 });
+  const saved = store.get("cover", { style: "", lyrics: "", task: "melody-full", seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16 });
   let upload = null, task = saved.task;
   const fileIn = h("input", { type: "file", accept: ACCEPT, id: "c-file", onchange: (e) => e.target.files[0] && doUpload(e.target.files[0]) });
   const dropText = h("div", {}, h("b", {}, "Drop an audio file"), " or click to choose", h("div", { class: "hint" }, "mp3, wav, flac, m4a, ogg · up to 200 MB"));
@@ -18,7 +18,7 @@ export async function coverView({ el, app }) {
     title: h("input", { id: "c-title", type: "text", value: saved.title, placeholder: "defaults to the file name" }),
     style: h("textarea", { id: "c-style", rows: 2, placeholder: "e.g. acoustic folk, male vocal, fingerpicked guitar", required: true }, saved.style),
     lyrics: h("textarea", { id: "c-lyrics", class: "lyrics", placeholder: "[Verse]\n…", required: true }, saved.lyrics),
-    seed: h("input", { id: "c-seed", type: "number", min: 0, max: 2147483647, value: saved.seed, placeholder: "random" }),
+    seed: seedField({ id: "c-seed", seed: saved.seed, random: saved.random_seed !== false, onChange: () => collect() }),
   };
   const taskHint = h("p", { class: "hint" });
   const taskSeg = h("div", { class: "seg", role: "group", "aria-label": "Task" }, TASKS.map(([v, l]) => h("button", { type: "button", dataset: { v }, onclick: () => setTask(v) }, l)));
@@ -51,7 +51,7 @@ export async function coverView({ el, app }) {
     } catch (e) { upload = null; toastError(e); fill(dropText, h("b", {}, "Upload failed"), " — click to try again"); }
   }
 
-  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, seed: f.seed.value === "" ? "" : Number(f.seed.value), ...presets.value() }; store.set("cover", v); return v; }
+  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, seed: f.seed.raw(), random_seed: f.seed.isRandom(), ...presets.value() }; store.set("cover", v); return v; }
   async function onSubmit(e) {
     e.preventDefault();
     const v = collect();
@@ -59,7 +59,7 @@ export async function coverView({ el, app }) {
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     submit.disabled = true;
     try {
-      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, params: { upload_id: upload.upload_id, task: v.task, style: v.style, lyrics: v.lyrics, seed: v.seed === "" ? null : v.seed, title: v.title || null } });
+      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, params: { upload_id: upload.upload_id, task: v.task, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null } });
       toast(`Queued cover “${r.job.title || upload.filename}”`, "ok"); location.hash = "#/queue";
     } catch (err) { toastError(err); submit.disabled = false; }
   }
@@ -72,7 +72,7 @@ export async function coverView({ el, app }) {
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Lyrics"), h("span", {}, "required")), f.lyrics)),
     h("div", { class: "panel sticky stack" },
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
-      h("label", { class: "field" }, h("span", { class: "lbl" }, "Seed"), h("div", { class: "row nowrap" }, f.seed, h("button", { type: "button", class: "icon", "aria-label": "Random seed", onclick: () => { f.seed.value = randomSeed(); collect(); } }, "🎲"))),
+      h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
       submit, h("p", { class: "hint" }, "The upload is transcribed first (SheetSage2 + MERT), then the song is generated from that score.")));
   fill(el, h("div", { class: "view-head" }, h("h1", {}, "Cover"), h("span", { class: "sub" }, "Transcribe an existing recording and re-imagine it in a new style.")), form);
   return { unmount: () => app.listeners.delete(listener) };

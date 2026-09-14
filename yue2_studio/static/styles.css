@@ -176,3 +176,11 @@ pre.block { margin: 0; padding: 10px; background: var(--surface-2); border-radiu
 @media (min-width: 761px) { .results-col { position: sticky; top: 60px; max-height: calc(100vh - 76px); overflow-y: auto; padding-right: 2px; } }
 .results-col .card audio { margin-top: 2px; }
 pre.lyrics-block { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font); font-size: 14px; line-height: 1.5; max-height: none; }
+
+/* library multi-select */
+.selbar { position: sticky; top: 49px; z-index: 5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 12px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px; box-shadow: var(--shadow); }
+.card input.sel { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--accent); cursor: pointer; }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+input:disabled, button:disabled { opacity: .55; }
+.check.small { font-size: 12px; color: var(--muted); }
