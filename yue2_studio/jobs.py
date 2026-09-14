@@ -241,6 +241,7 @@ class Job:
     audio_seconds: float | None = None
     truncated: dict | None = None
     progress: dict | None = None
+    seq: int = 0
     artifacts: dict = field(default_factory=lambda: {"audio": False, "score": False, "plan": False,
                                                      "transcription": False})
     position: int | None = None
@@ -284,6 +285,7 @@ class Job:
             "progress": self.progress,
             "artifacts": dict(self.artifacts),
             "position": self.position,
+            "seq": self.seq,
         }
 
 
@@ -376,7 +378,7 @@ class JobStore:
             precision=row["precision"], ode_steps=row["ode_steps"], seed=row["seed"],
             created_at=row["created_at"], started_at=row["started_at"], finished_at=row["finished_at"],
             error=row["error"], timing=_loads(row["timing_json"]), audio_seconds=row["audio_seconds"],
-            truncated=_loads(row["truncated_json"]), progress=_loads(row["progress_json"]),
+            truncated=_loads(row["truncated_json"]), progress=_loads(row["progress_json"]), seq=row["seq"],
         )
         if self.songs_dir is not None:
             job.artifacts = artifacts_for(self.songs_dir / job.id)
@@ -440,7 +442,7 @@ class JobStore:
             if row is None:
                 raise NotFound(f"group {group_id!r} not found")
             ids = [r["id"] for r in self._conn.execute(
-                "SELECT id FROM jobs WHERE group_id = ? ORDER BY seed ASC, seq ASC", (group_id,))]
+                "SELECT id FROM jobs WHERE group_id = ? ORDER BY seq ASC", (group_id,))]
             return {"id": row["id"], "label": row["label"], "created_at": row["created_at"], "job_ids": ids}
 
     def list(self, *, status: list[str] | str | None = None, kind: list[str] | str | None = None,
@@ -614,13 +616,30 @@ def default_group_label(base: CreateParams, count: int) -> str:
     return f"{name} ×{count}"
 
 
+_PARAM_MODELS = {"create": CreateParams, "regenerate": RegenerateParams, "cover": CoverParams,
+                 "variations": VariationsParams}
+
+
+def validate_submit(body: Any) -> SubmitRequest:
+    """Shape-check a ``POST /api/jobs`` body without touching the store (400 before any 503/409)."""
+    req = parse(SubmitRequest, body)
+    params = parse(_PARAM_MODELS[req.kind], req.params)
+    if isinstance(params, CreateParams):
+        params.check()
+    elif isinstance(params, VariationsParams):
+        params.base.check()
+    if req.preset == "custom" and (req.precision is None or req.ode_steps is None):
+        raise ValidationFailure("preset=custom requires precision and ode_steps")
+    return req
+
+
 def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
     """Validate a ``POST /api/jobs`` body and insert the resulting job rows.
 
     ``upload_lookup(upload_id) -> dict | None`` resolves an upload to ``{"filename": str, ...}``;
     required for covers. Raises ``ValidationFailure`` (400) / ``NotFound`` (404).
     """
-    req = parse(SubmitRequest, body)
+    req = validate_submit(body)
     settings = store.get_settings()
 
     if req.kind == "create":

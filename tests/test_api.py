@@ -203,6 +203,8 @@ async def test_validation_errors_shape(client):
     assert r.status_code == 404
     r = await client.post("/api/jobs", content=b"{bad json", headers={"content-type": "application/json"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+    r = await client.post("/api/jobs", json={"kind": "create", "preset": "custom", "params": BASE})
+    assert r.status_code == 400
 
 
 async def test_variations_returns_group_and_jobs(client):
@@ -212,6 +214,7 @@ async def test_variations_returns_group_and_jobs(client):
     assert set(group) == {"id", "label", "created_at", "job_ids"} and len(group["id"]) == 32
     assert [j["seed"] for j in members] == [10, 11, 12]
     assert group["job_ids"] == [j["id"] for j in members]
+    assert [j["seq"] for j in members] == sorted(j["seq"] for j in members)
     assert all(j["group_id"] == group["id"] and j["kind"] == "create" for j in members)
     positions = [j["position"] for j in members if j["status"] == "queued"]
     assert positions == sorted(positions) and len(set(positions)) == len(positions)
@@ -388,6 +391,8 @@ async def test_models_missing_gives_503_with_real_paths(tmp_path):
             assert "MERT-v2-FullSong not downloaded" in status["cover"]["reasons"]
             r = await c.post("/api/jobs", json={"kind": "create", "params": BASE})
             assert r.status_code == 503 and r.json()["error"]["code"] == "engine_unavailable"
+            r = await c.post("/api/jobs", json={"kind": "create", "params": {"style": ""}})
+            assert r.status_code == 400  # malformed bodies are 400 even when models are missing
 
 
 def test_fake_app_never_imports_mlx(tmp_path):

@@ -196,18 +196,40 @@ async def test_variations_run_serially_in_seed_order(harness):
     assert order == [5, 6, 7]
 
 
-async def test_stop_cancels_running_job(tmp_path):
+async def test_stop_cancels_only_running_job_and_restart_requeues(tmp_path):
     h = Harness(tmp_path, FakeEngine(delay=0.05))
     h.worker.start(asyncio.get_running_loop())
-    job = h.submit({"kind": "create", "params": BASE})
-    q = h.bus.subscribe(job.id)
-    await asyncio.wait_for(q.get(), 5)
-    h.bus.unsubscribe(job.id, q)
-    h.worker.stop(timeout=5)
+    running = h.submit({"kind": "create", "params": BASE})
+    queued = [h.submit({"kind": "create", "params": BASE}) for _ in range(3)]
+    q = h.bus.subscribe(running.id)
+    await asyncio.wait_for(q.get(), 5)  # the first job is running
+    h.bus.unsubscribe(running.id, q)
+    await asyncio.to_thread(h.worker.stop, 5)
     assert not h.worker.alive
-    assert h.store.get(job.id).status == "cancelled"
+    assert h.store.get(running.id).status == "cancelled"
+    for job in queued:  # untouched: still queued, never started, no song dir
+        row = h.store.get(job.id)
+        assert row.status == "queued" and row.started_at is None
+        assert not (h.paths.songs_dir / job.id).exists()
+    assert h.store.queued_ids() == [j.id for j in queued]
     assert h.engine.state == "cold"  # unloaded on the worker thread
-    h.store.close()
+    # a fresh worker (server restart) re-enqueues the queued rows and runs them
+    h.engine.delay = 0
+    h.worker = Worker(h.store, h.engine, h.paths, h.bus, fake=True)
+    queues = {job.id: h.bus.subscribe(job.id) for job in queued}  # before start: no done can be missed
+    h.worker.start(asyncio.get_running_loop())
+    try:
+        for job in queued:
+            while True:
+                kind, payload = await asyncio.wait_for(queues[job.id].get(), 10)
+                if kind == "done":
+                    break
+            assert payload["status"] == "done"
+    finally:
+        for job in queued:
+            h.bus.unsubscribe(job.id, queues[job.id])
+        await asyncio.to_thread(h.worker.stop)
+        h.store.close()
 
 
 # -- pure functions ---------------------------------------------------------------------------

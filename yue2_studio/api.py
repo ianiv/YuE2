@@ -220,6 +220,7 @@ async def post_jobs(request: Request):
     body = await _json_body(request)
     if not isinstance(body, dict):
         raise ApiError(400, "validation_error", "body must be a JSON object")
+    jobs.validate_submit(body)  # 400 for malformed bodies before any availability check
     if not _models_present(request):
         raise ApiError(503, "engine_unavailable", "models are missing; run scripts/setup.py")
     if body.get("kind") == "cover":
@@ -415,6 +416,9 @@ async def post_upload(request: Request, file: UploadFile | None = None):
         ext = audio.validate_upload_name(file.filename)
     except audio.BadUploadType as error:
         raise ApiError(400, "validation_error", str(error)) from None
+    # Browsers always send Content-Length for FormData bodies, so oversize uploads are rejected up
+    # front; a chunked request without it is only capped while being copied to data/uploads/ (see
+    # API.md), after the multipart parser has spooled it to a temp file.
     length = request.headers.get("content-length")
     if length and length.isdigit() and int(length) > audio.UPLOAD_MAX_BYTES + 4096:
         raise ApiError(413, "too_large", "upload exceeds 200 MB")

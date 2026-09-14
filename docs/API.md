@@ -48,6 +48,7 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 | `progress` | ProgressEvent? | last event emitted (also for terminal jobs); null if none yet |
 | `artifacts` | object | `{"audio": bool, "score": bool, "plan": bool, "transcription": bool}`; all false until produced |
 | `position` | int? | 0-based queue position while `queued`; null otherwise |
+| `seq` | int | server-wide insertion counter (strictly increasing); order by it when `created_at` ties (variations members share a millisecond) |
 
 ### CreateParams
 
@@ -108,7 +109,8 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 
 ### Group
 
-`{"id": str (uuid4 hex), "label": str, "created_at": str, "job_ids": [str]}` — `job_ids` in seed order.
+`{"id": str (uuid4 hex), "label": str, "created_at": str, "job_ids": [str]}` — `job_ids` in submit order
+(= ascending `seq`; equals seed order unless `random_seeds`).
 
 ### ProgressEvent (SSE `data`)
 
@@ -182,7 +184,7 @@ Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?}`.
 ```
 → **201** `{"job": Job}` (status `queued`, `position` set).
 
-`kind=variations` → **201** `{"group": Group, "jobs": [Job, …]}` (jobs in seed order, each `kind=create`, `group_id` set).
+`kind=variations` → **201** `{"group": Group, "jobs": [Job, …]}` (jobs in submit/`seq` order, each `kind=create`, `group_id` set).
 
 Errors: 400 validation; 404 unknown `parent_id`/`upload_id`; 409 cover unavailable; 503 models missing.
 
@@ -247,7 +249,9 @@ answer `HEAD` (players probe with it before requesting ranges).
 `multipart/form-data`, single field `file`. Accepted extensions: `mp3 wav flac m4a ogg`; max **200 MB**.
 Stored at `data/uploads/<upload_id>.<ext>`.
 → **201** `{"upload_id": "<uuid4 hex>", "filename": "demo.mp3", "seconds": 187.4, "path_hint": "data/uploads/<id>.mp3"}`
-(`seconds` null if ffprobe unavailable). 400 bad type, 413 too large.
+(`seconds` null if ffprobe unavailable). 400 bad type, 413 too large. The 200 MB cap is checked against
+`Content-Length` before the body is read (browsers always send it for `FormData`); a chunked upload without it is
+only rejected while being copied into `data/uploads/`, after the multipart parser has buffered it to a temp file.
 
 ### `GET /api/settings` → 200 `Settings`.  `PUT /api/settings` body = partial `Settings` → 200 full `Settings` | 400.
 
@@ -386,8 +390,9 @@ The worker derives the HTTP `Job.timing` (`{"plan": 15.8, "semantic": 35.9, "syn
 
 Worker behaviour worth knowing: jobs run strictly serially in submit order; the worker emits the `status`
 `stage="load"` event whenever the engine is cold or the requested precision differs from the resident one; a
-non-cancellation engine error unloads the engine (state `cold`) and the next job rebuilds it. On server start any
-row still `queued` is re-enqueued and any row left `running` is marked `failed` ("server restarted…").
+non-cancellation engine error unloads the engine (state `cold`) and the next job rebuilds it. Shutdown (incl.
+`--reload`) cancels only the running job and leaves queued rows `queued`; on server start any row still `queued`
+is re-enqueued and any row left `running` is marked `failed` ("server restarted…").
 
 **Raw engine events** (`on_event(dict)`; keys absent when null, no `job_id`):
 

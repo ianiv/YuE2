@@ -27,8 +27,9 @@ def test_create_job_fills_defaults_and_api_shape(store):
     api = job.to_api()
     expected_keys = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps",
                      "seed", "params", "title", "created_at", "started_at", "finished_at", "error", "timing",
-                     "truncated", "progress", "artifacts", "position"}
+                     "truncated", "progress", "artifacts", "position", "seq"}
     assert set(api) == expected_keys
+    assert isinstance(api["seq"], int) and api["seq"] >= 1
     assert api["position"] == 0 and api["title"] is None and api["timing"] is None
     assert api["artifacts"] == {"audio": False, "score": False, "plan": False, "transcription": False}
     assert api["created_at"].endswith("Z") and len(api["created_at"]) == 24
@@ -97,8 +98,8 @@ def test_variations_random_seeds_and_label(store):
     seeds = [j.seed for j in sub.jobs]
     assert len(seeds) == 4 and all(0 <= s <= jobs.MAX_SEED for s in seeds)
     assert sub.group["label"] == "my batch"
-    by_seed = [j.id for j in sorted(sub.jobs, key=lambda j: j.seed)]
-    assert store.get_group(sub.group["id"])["job_ids"] == by_seed
+    assert store.get_group(sub.group["id"])["job_ids"] == [j.id for j in sub.jobs]  # submit order, not seed
+    assert [j.seq for j in sub.jobs] == sorted(j.seq for j in sub.jobs)
 
 
 def test_regenerate_inherits_from_parent(store):

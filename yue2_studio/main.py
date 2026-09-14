@@ -57,7 +57,10 @@ def create_app(engine=None, *, home: str | os.PathLike | None = None, fake: bool
             yield
         finally:
             await asyncio.to_thread(worker.stop)
-            store.close()
+            if worker.alive:  # still inside an engine call: leave the connection for it
+                log.warning("worker did not stop in time; leaving the job store open")
+            else:
+                store.close()
 
     app = FastAPI(title="YuE2 Studio", version=__version__, lifespan=lifespan, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)

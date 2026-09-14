@@ -208,7 +208,10 @@ class EventBus:
         self._dispatch(job_id, ("progress", event))
 
     def done(self, job_id: str, job_json: dict) -> None:
-        """Deliver the terminal frame; subscribers are dropped afterwards (the DB keeps the state)."""
+        """Deliver the terminal frame; subscribers and the cached event are dropped (the DB keeps the
+        terminal progress, which the worker persists before calling this)."""
+        with self._lock:
+            self._last.pop(job_id, None)
         self._dispatch(job_id, ("done", job_json))
 
     def forget(self, job_id: str) -> None:
@@ -266,7 +269,7 @@ class Worker:
         self.current_job_id: str | None = None
         self.memory: dict | None = None
         self._last_memory_sample = 0.0
-        self.load_error: str | None = None
+        self._stopping = False
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -284,15 +287,20 @@ class Worker:
         self._thread.start()
 
     def stop(self, timeout: float = 30.0) -> None:
+        """Stop after the current job: it is cancelled, queued rows stay ``queued`` (re-enqueued on start)."""
         thread = self._thread
         if thread is None:
             return
+        self._stopping = True
         with self._lock:
-            for event in self._cancels.values():
-                event.set()
+            current = self.current_job_id
+            event = self._cancels.get(current) if current is not None else None
+        if event is not None:
+            event.set()
         self._queue.put(None)
         thread.join(timeout)
-        self._thread = None
+        if not thread.is_alive():
+            self._thread = None
 
     @property
     def alive(self) -> bool:
@@ -356,7 +364,7 @@ class Worker:
         try:
             while True:
                 job_id = self._queue.get()
-                if job_id is None:
+                if job_id is None or self._stopping:
                     break
                 job = self.store.find(job_id)
                 if job is None or job.status != "queued":
@@ -392,6 +400,8 @@ class Worker:
         with self._lock:
             cancel = self._cancels.setdefault(job.id, threading.Event())
         if not self.store.update_status(job.id, "running", expected="queued"):
+            with self._lock:
+                self._cancels.pop(job.id, None)
             return  # cancelled between dequeue and start
         self.current_job_id = job.id
         job = self.store.get(job.id)
@@ -418,7 +428,6 @@ class Worker:
                 self._publish(job.id, status_event(job.id, "running",
                                                    f"loading models ({options.precision})…", stage="load"))
             engine.ensure(options, on_event)
-            self.load_error = None
             self._sample_memory(force=True)
             request = engine_request(job)
             if job.kind == "cover":
