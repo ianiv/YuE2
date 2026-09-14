@@ -112,23 +112,29 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`).
 
 ### ProgressEvent (SSE `data`)
 
+This is the **HTTP shape**. The engine emits a slightly different raw shape (see §6); the worker normalises it.
+
 | Field | Type | Notes |
 |-------|------|-------|
 | `type` | enum(stage\|token\|abc\|log\|status) | |
 | `job_id` | str | |
 | `ts` | str | |
-| `stage` | str? | label: `load`, `transcribe`, `plan`, `semantic`, `synthesize`, `decode`, `save` |
+| `stage` | str? | short key: `load`, `transcribe`, `plan`, `semantic`, `synthesize`, `decode`, `save` |
+| `label` | str? | `type=stage`: the engine's human label, e.g. `"Synthesizing audio"` |
 | `completed` | int? | `type=stage`: units done |
 | `total` | int? | `type=stage`: may be null when unknown |
-| `unit` | str? | `type=stage`: e.g. `"tokens"`, `"steps"`, `"frames"` |
-| `status` | enum(running\|complete\|failed\|cancelled)? | `type=stage`: stage state; `type=status`: job state |
-| `phase` | enum(abc\|semantic)? | `type=token`/`abc` |
-| `tokens` | int? | `type=token`: tokens generated so far in `phase` |
-| `tps` | float? | `type=token`: tokens/s rolling average |
-| `text` | str? | `type=abc`: full partial ABC decoded so far (replace, don't append) |
+| `unit` | str? | `type=stage`: e.g. `"tokens"`, `"steps"`, `"chunks"`, `"windows"` |
+| `status` | enum(running\|complete\|failed\|cancelled\|truncated)? | `type=stage`: stage state; `type=status`: job state |
+| `phase` | enum(abc\|semantic\|transcription)? | `type=token`/`abc` |
+| `tokens` | int? | `type=token`: tokens generated so far in `phase`; `type=abc`: ABC tokens so far |
+| `tps` | float? | `type=token`/`stage` (unit=tokens): tokens/s since the phase started |
+| `seconds` | float? | `type=stage`/`token`: elapsed seconds in this stage/phase |
+| `text` | str? | `type=abc`: full partial ABC decoded so far (replace, don't append); the last one has `partial=false` |
+| `partial` | bool? | `type=abc`: `true` while planning streams, `false` for the final score |
 | `message` | str? | `type=log`/`status`: human text, e.g. `"loading models (bf16)…"` |
 
-Rules: fields not relevant to the `type` are `null`. `token` events are throttled to ≤4 Hz; `abc` events ≤4 Hz.
+Rules: fields not relevant to the `type` are `null`. `token` events are throttled to ≤4 Hz; `abc` events ≤4 Hz;
+`stage` events ≤4 Hz plus one forced event at stage start (`completed=0`) and one at stage end.
 A `status` event with `message` is emitted for engine load (`stage="load"`), on job start (`status=running`)
 and immediately before `done` with the terminal status.
 
@@ -292,33 +298,104 @@ Variations: `#/create` with N>1 → `POST /api/jobs {kind:"variations", params:{
 instead of constructing `StudioPipeline`; `home` overrides `YUE2_STUDIO_HOME` (tests pass a tmp dir).
 `yue2-studio --fake` starts the server with the fake engine so the frontend can be developed without models.
 
-Engine interface (the only methods the worker calls; `FakeEngine` in `tests/fake_engine.py` implements it):
+Engine interface (the only methods the worker calls; `FakeEngine` in `tests/fake_engine.py` implements it).
+This mirrors the **real** `yue2_studio/engine.py`:
 
 ```python
 class Engine(Protocol):
     state: str                       # "cold" | "loading" | "ready" | "busy"
     precision: str | None            # current pipeline precision, None when cold
+    pipeline: Any | None             # resident StudioPipeline (None when cold)
 
-    def ensure(self, options: EngineOptions) -> None:
-        """Load (or rebuild if precision differs) the pipeline. options = {precision, ode_steps,
-        memory_budget_gib, require_ac}. Emits stage="load" events via the on_event given to the worker."""
+    def ensure(self, options: EngineOptions, on_event: Callable[[dict], None] | None = None) -> Any:
+        """Build the pipeline lazily; rebuild (close + construct) when precision / memory_budget_gib /
+        require_ac change (``EngineOptions.build_key``). ode_steps is per job. Cheap: weights load lazily
+        inside the first job, surfacing as "Loading … model" stage events. Returns the pipeline."""
 
     def create_song(self, request: dict, out_dir: Path, *, options: EngineOptions,
-                    on_event: Callable[[dict], None], cancelled: Callable[[], bool]) -> dict:
-        """request = resolved CreateParams. Writes audio.flac/score.abc/plan.json/result.json to out_dir.
-        Returns {"timing": {...}, "audio_seconds": float, "truncated": dict|None, "seed": int}.
-        Raises CancelledError when cancelled() is observed; any other exception → job failed."""
+                    on_event: Callable[[dict], None] | None = None,
+                    cancelled: Callable[[], bool] | None = None) -> dict:
+        """request = YuE2 request dict: style, lyrics, cot, seed, abc?, cfg_scale?, id?, plus optional
+        abc_sampling / semantic_sampling / generation_config overrides (title etc. must be stripped
+        by the worker). Raises InterruptedError when cancelled() is observed (any stage);
+        any other exception -> job failed AND the engine unloads its pipeline (the GPU guard's
+        latched error would otherwise poison every later job); the next ensure() rebuilds it."""
 
-    def cover_song(self, request: dict, audio_path: Path, out_dir: Path, *, options, on_event, cancelled) -> dict:
-        """request = resolved CoverParams. Also writes out_dir/transcription/score.abc. Same return."""
+    def cover_song(self, audio_path: Path, out_dir: Path, *, task: str, request: dict,
+                   options: EngineOptions, on_event=None, cancelled=None) -> dict:
+        """task in {melody-full, melody-vocal, full}; request as above without abc (cot is forced to
+        melody/full to match task). Transcribes first (stage "Transcribing audio", then releases and
+        lazily reloads the song models), then runs create_song with the transcribed ABC. Same return
+        plus "transcription" (below) and timing.transcription_seconds. State stays "busy" throughout."""
 
-    def memory_footprint(self) -> float | None:   # GiB, None when cold
-    def unload(self) -> None
+    def memory_footprint(self) -> dict:   # bytes: rss_bytes, system_available_bytes, mlx_active_bytes,
+                                          # mlx_cache_bytes, mlx_peak_bytes (worker converts to GiB)
+    def unload(self) -> None              # close pipeline, release GPU guard; state -> cold
 ```
 
-`on_event` receives ProgressEvent dicts **without** `job_id`/`ts` (the worker adds them). `FakeEngine` emits a
-scripted sequence — load, plan (3 `abc` events with growing text), semantic (token events), synthesize, decode,
-save — with a configurable delay per event (default 0.05 s; `--fake` uses 0.3 s), honours `cancelled()` between
-events, writes a ~1 s silent stereo 48 kHz FLAC as `audio.flac`, a minimal ABC (`X:1\nT:Fake\nK:C\nCDEF|`) as
-`score.abc`, `{"fake": true}` as `plan.json`, and for covers a `transcription/score.abc`. `FakeEngine(fail=True)`
-raises in `synthesize` to exercise the `failed` path.
+`EngineOptions` (`yue2_studio.config`): frozen dataclass `{precision, ode_steps, memory_budget_gib, require_ac,
+preset}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *, memory_budget_gib, require_ac)`.
+
+**Artifact layout written by the engine** (`out_dir` = `data/songs/<job_id>/`):
+
+| Path | Written | Contents |
+|------|---------|----------|
+| `plan/` | right after planning, before semantic generation | `plan.json`, `score.abc` (absent when `cot=off`), `abc_tokens.npy`, `prefix.npy`, `plan_manifest.json` |
+| `song/` | at the end (`SongResult.save_artifacts`, needs an empty dir) | `audio.flac` (48 kHz stereo 24-bit), `result.json` (`status: "complete"`), `score.abc`, `plan.json`, `request.json`, `config.json`, `semantic.npy`, `latent.npy`, `noise.npy`, … |
+| `summary.json` | at the end | the dict returned by `create_song` / `cover_song` |
+| `transcription/` | covers only, before the song stages | `score.abc`, `result.json`, `melody.mid`, `*.lab`, `events.json`, … |
+| `request.json`, `cover.json` | covers only | resolved request incl. transcribed `abc`; cover receipt |
+
+The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` → `song/score.abc` (fall back to
+`plan/score.abc` for a failed job), `plan.json` → `plan/plan.json`, `transcription/score.abc` → same path.
+
+**`create_song` return dict** (also `summary.json`):
+
+```json
+{"status": "complete", "audio_path": "/abs/.../song/audio.flac", "score_path": "/abs/.../song/score.abc" | null,
+ "song_dir": "...", "plan_dir": "...", "sample_rate": 48000, "seconds": 184.7,
+ "timing": {"abc": {"seconds": 15.8, "output_tokens": 2072, "prefill_seconds": …, "ttft_seconds": …, "content_tokens": …},
+            "semantic": {"seconds": 35.9, "output_tokens": 4618, …},
+            "nar_seconds": 27.2, "vae_seconds": 3.4, "e2e_seconds": 82.4,
+            "load": {"ar_load_seconds": 0.09, "conditioning_load_seconds": 0.11, "nar_load_seconds": 0.07, "vae_load_seconds": 0.11, …},
+            "stages": {"Planning score": 15.8, "Generating song": 35.9, "Synthesizing audio": 27.0, "Decoding audio": 3.2, …},
+            "transcription_seconds": 4.1},
+ "truncated": {"abc": false, "semantic": true},
+ "identity": "<sha256>", "preset": "fast", "precision": "8bit", "ode_steps": 8, "seed": 12300,
+ "transcription": {"dir": "...", "task": "melody-full", "seconds": 4.1, "source_audio_sha256": "…", "duration_seconds": 16.0}}
+```
+
+`timing.abc` is `{"seconds": 0.0, "output_tokens": 0, "external_prefix_tokens": N}` when the ABC was supplied;
+`transcription*` keys exist only for covers. `truncated` is always `{"abc": bool, "semantic": bool}`.
+The worker derives the HTTP `Job.timing` (`{"plan": 15.8, "semantic": 35.9, "synthesize": 27.2, "decode": 3.4,
+"transcribe": 4.1, "e2e": 82.4, "abc_tps": 131.1, "semantic_tps": 128.8, "audio_seconds": 184.7}`) and `Job.truncated`
+(`{"phase": "semantic", "reason": "generation limit reached"}` for the first true flag, else null) from it.
+
+**Raw engine events** (`on_event(dict)`; keys absent when null, no `job_id`):
+
+| `type` | Keys | Notes |
+|--------|------|-------|
+| `stage` | `stage` (upstream human label), `completed`, `total?`, `unit?`, `status`, `tps?`, `seconds`, `ts` (unix float) | `status ∈ running\|completed\|failed\|cancelled\|truncated`. Labels: `Verifying model files`, `Loading {bf16\|8bit\|4bit} AR model`, `Loading BF16 acoustic conditioning`, `Loading acoustic model`, `Loading MLX audio decoder`, `Using provided score`, `Planning score` (unit tokens), `Generating song` (tokens), `Synthesizing audio` (steps), `Decoding audio` (chunks), `Transcribing audio` (windows) |
+| `token` | `phase` (`abc`\|`semantic`\|`transcription`), `tokens`, `tps?`, `seconds`, `ts` | ≤4 Hz |
+| `abc` | `phase="abc"`, `text`, `tokens`, `status` (`partial`\|`final`), `ts` | `partial` ≤4 Hz while planning; one `final` with the complete score after planning (also for supplied ABC) |
+| `log` | `text`, `ts` | e.g. `"Completed 184.7s of audio in 82.4s"` |
+
+**Engine → HTTP normalisation (the worker must implement):**
+
+| Engine | HTTP |
+|--------|------|
+| `stage` label → `stage` key | `Verifying model files`, `Loading …` → `load`; `Transcribing audio` → `transcribe`; `Using provided score`, `Planning score` → `plan`; `Generating song` → `semantic`; `Synthesizing audio` → `synthesize`; `Decoding audio` → `decode`; the worker itself emits `save` around `save_artifacts`/DB write. Original label kept in `label`. |
+| `status: completed` | `complete` (`running`/`failed`/`cancelled`/`truncated` pass through) |
+| `abc.status: partial\|final` | `partial: true\|false` |
+| `log.text` | `message` |
+| `ts` (unix float) | ISO-8601 `Z` string; add `job_id` |
+| absent keys | `null` (every ProgressEvent field present) |
+
+`on_event` receives raw engine dicts; the worker adds `job_id`/`ts` after normalising. `FakeEngine` emits the same
+raw engine shape (labels above) — load, plan (3 `abc` events with growing text, then `final`), semantic (token
+events), synthesize, decode — with a configurable delay per event (default 0.05 s; `--fake` uses 0.3 s), honours
+`cancelled()` between events (raising `InterruptedError`), writes a ~1 s silent stereo 48 kHz FLAC as
+`song/audio.flac`, a minimal ABC (`X:1\nT:Fake\nK:C\nCDEF|`) as `plan/score.abc` and `song/score.abc`,
+`{"fake": true}` as `plan/plan.json` and `song/result.json` (`status: "complete"`), `summary.json`, and for covers a
+`transcription/score.abc`; returns the summary dict above. `FakeEngine(fail=True)` raises in `synthesize` to
+exercise the `failed` path.

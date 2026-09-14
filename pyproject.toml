@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yue2-studio"
+version = "0.1.0"
+description = "Local YuE2 music-generation studio for Apple Silicon, built on mlx-Yue"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mlx-yue[transcription]",
+  "lyra-yue2",
+  "fastapi",
+  "uvicorn[standard]",
+  "sse-starlette",
+  "python-multipart",
+  "huggingface-hub",
+  "psutil",
+]
+
+[project.scripts]
+yue2-studio = "yue2_studio.main:main"
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "httpx", "ruff"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+mlx-yue = { git = "https://github.com/vanch007/mlx-Yue", rev = "ab0f058" }
+# metadata-only alias; see compat/lyra-yue2/src/lyra_yue2_compat/__init__.py
+lyra-yue2 = { path = "compat/lyra-yue2" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["yue2_studio"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
