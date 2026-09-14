@@ -95,6 +95,13 @@ export function renderScore(el, abc, opts = {}, { immediate = false } = {}) {
   if (wait <= 0) draw(); else s.timer = setTimeout(draw, wait);
 }
 
+/** Drop a rendered score (and any pending throttled draw) so the element holds no SVG. */
+export function clearScore(el) {
+  if (el._score) { clearTimeout(el._score.timer); el._score.timer = null; }
+  el._visual = null;
+  clear(el);
+}
+
 /** Minimal MIDI preview via abcjs' synth. Returns a toggle button. */
 export function scorePlayer(getVisual) {
   let synth = null, playing = false;

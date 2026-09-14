@@ -144,6 +144,8 @@ audio { width: 100%; height: 36px; display: block; }
 .stats { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .stats b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .abc-live.final { border-color: var(--ok); }
+.score-head { gap: 6px; min-height: 22px; }
+.score-head + .abc-live { margin-top: -4px; }
 .abc-live { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 4px; }
 .score { overflow-x: auto; background: #fff; color: #000; border-radius: var(--radius); border: 1px solid var(--border); padding: 6px; }
 .score svg { max-width: 100%; height: auto; }

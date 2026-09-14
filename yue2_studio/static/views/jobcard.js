@@ -1,19 +1,24 @@
 // Shared job cards: a live (queued/running) card driven by SSE, and result cards for terminal jobs.
 import { api, songUrl, subscribe } from "../api.js";
-import { estimate, fill, fmt, groupLabel, h, jobTitle, renderScore, STAGE_NAMES, STAGE_ORDER, toast, toastError } from "../ui.js";
+import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, renderScore, STAGE_NAMES, STAGE_ORDER, toast, toastError } from "../ui.js";
 
 const groupTag = (job) => job.group_id ? h("span", { class: "tag accent", title: groupLabel(job.group_id) || "variation group" }, groupLabel(job.group_id) ? fmt.excerpt(groupLabel(job.group_id), 28) : "group") : null;
 
 /**
  * Live card for a queued/running job. Subscribes to its SSE stream; calls onFinish(card, job) once when the
  * job reaches a terminal state (from SSE `done` or a cancel response). Returns {el, job, update, paint, close}.
+ * The streaming score section is collapsible per card; `scoreCollapsed: true` starts it collapsed (no SVG is
+ * rendered while collapsed — the latest ABC text is kept and drawn on expand).
  */
-export function liveCard(job, { onFinish, onGone } = {}) {
-  const c = { job, last: job.progress || null, abc: null, startedAt: job.started_at ? Date.parse(job.started_at) : null, finished: false };
+export function liveCard(job, { onFinish, onGone, scoreCollapsed = false } = {}) {
+  const c = { job, last: job.progress || null, abc: null, abcFinal: false, scoreOpen: !scoreCollapsed, startedAt: job.started_at ? Date.parse(job.started_at) : null, finished: false };
   const stageRow = h("div", { class: "stages" });
   const bar = h("div", { class: "progress" }, h("i"));
   const stats = h("div", { class: "stats" });
   const abcBox = h("div", { class: "abc-live score", hidden: true });
+  const scoreLabel = h("span", { class: "hint" });
+  const scoreBtn = h("button", { type: "button", class: "ghost sm", onclick: () => setScoreOpen(!c.scoreOpen) });
+  const scoreHead = h("div", { class: "row between score-head", hidden: true }, scoreLabel, scoreBtn);
   const cancelBtn = h("button", { class: "sm danger", onclick: () => cancel(cancelBtn) }, "Cancel");
   const status = h("span", { class: "tag" }, job.status);
   c.el = h("div", { class: "card", dataset: { id: job.id } },
@@ -22,20 +27,34 @@ export function liveCard(job, { onFinish, onGone } = {}) {
       cancelBtn),
     h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, job.preset)), h("span", {}, "seed ", h("b", { class: "num" }, job.seed)), h("span", {}, "mode ", h("b", {}, job.params.cot || job.params.task || "—")),
       job.position !== null && job.status === "queued" ? h("span", { class: "pos" }, "position ", h("b", {}, job.position + 1)) : null),
-    stageRow, bar, stats, abcBox);
+    stageRow, bar, stats, scoreHead, abcBox);
 
   function onEvent(ev) {
     if (ev.type === "status" && ev.status === "running" && !c.startedAt) c.startedAt = Date.now();
     if (ev.type === "stage" || ev.type === "token") c.last = ev.type === "stage" ? ev : { ...(c.last || {}), tps: ev.tps ?? (c.last && c.last.tps), completed: ev.tokens ?? (c.last && c.last.completed) };
     if ((ev.type === "status" || ev.type === "log") && ev.message) c.message = ev.message;
     if (ev.type === "abc" && ev.text) {
-      c.abc = ev.text; abcBox.hidden = false;
-      const final = ev.partial === false;
-      renderScore(abcBox, ev.text, { staffwidth: 600 }, { immediate: final });
-      abcBox.classList.toggle("final", final); abcBox.title = final ? "Final score" : "Score streaming in…";
+      c.abc = ev.text; c.abcFinal = ev.partial === false;
+      scoreHead.hidden = false; scoreLabel.textContent = c.abcFinal ? "Final score" : "Score streaming in…";
+      if (c.scoreOpen) drawScore(c.abcFinal); // collapsed: keep buffering, draw on expand
     }
     paint();
   }
+
+  function drawScore(immediate) {
+    abcBox.hidden = false;
+    abcBox.classList.toggle("final", c.abcFinal); abcBox.title = c.abcFinal ? "Final score" : "Score streaming in…";
+    renderScore(abcBox, c.abc, { staffwidth: 600 }, { immediate });
+  }
+  /** Expand/collapse the score; collapsing removes the SVG (and cancels any pending throttled draw). */
+  function setScoreOpen(open) {
+    c.scoreOpen = open;
+    scoreBtn.textContent = open ? "Hide score" : "Show score";
+    scoreBtn.setAttribute("aria-expanded", String(open));
+    if (open) { if (c.abc) drawScore(true); }
+    else { abcBox.hidden = true; clearScore(abcBox); }
+  }
+  setScoreOpen(c.scoreOpen);
 
   function paint() {
     const { job, last } = c;
