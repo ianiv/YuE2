@@ -69,11 +69,64 @@ CONVERTED_DIR = MODELS_DIR / "converted"
 VAE_DIR = MODELS_DIR / "vae"
 HF_CACHE_DIR = MODELS_DIR / "hf-cache"
 FFMPEG = shutil.which("ffmpeg")
+FFPROBE = shutil.which("ffprobe")
+
+
+@dataclass(frozen=True)
+class Paths:
+    """Every filesystem location derived from one ``home`` directory.
+
+    The module constants above are the process defaults (``YUE2_STUDIO_HOME`` / repo root);
+    ``create_app(home=...)`` builds a ``Paths`` for a different root (tests use a tmp dir) and
+    passes it explicitly to the store, worker and routes instead of mutating module globals.
+    """
+
+    home: Path
+
+    @property
+    def data_dir(self) -> Path:
+        return self.home / "data"
+
+    @property
+    def songs_dir(self) -> Path:
+        return self.data_dir / "songs"
+
+    @property
+    def uploads_dir(self) -> Path:
+        return self.data_dir / "uploads"
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "app.db"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.home / "models"
+
+    @property
+    def converted_dir(self) -> Path:
+        return self.models_dir / "converted"
+
+    @property
+    def vae_dir(self) -> Path:
+        return self.models_dir / "vae"
+
+    @property
+    def hf_cache_dir(self) -> Path:
+        return self.models_dir / "hf-cache"
+
+    def ensure_dirs(self) -> None:
+        for path in (self.songs_dir, self.uploads_dir, self.models_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+
+def paths_for(home: str | os.PathLike | None = None) -> Paths:
+    """``Paths`` rooted at ``home`` (default: the process ``HOME``)."""
+    return Paths(Path(home).expanduser().resolve() if home is not None else HOME)
 
 
 def ensure_dirs() -> None:
-    for path in (SONGS_DIR, UPLOADS_DIR, MODELS_DIR):
-        path.mkdir(parents=True, exist_ok=True)
+    paths_for().ensure_dirs()
 
 
 @dataclass(frozen=True)
@@ -153,18 +206,21 @@ def hf_snapshot_dir(repo: str, revision: str, cache_dir: Path = HF_CACHE_DIR) ->
     return cache_dir / f"models--{repo.replace('/', '--')}" / "snapshots" / revision
 
 
-def models_available() -> dict:
+def models_available(paths: Paths | None = None) -> dict:
+    converted = CONVERTED_DIR if paths is None else paths.converted_dir
+    vae = VAE_DIR if paths is None else paths.vae_dir
     return {
-        "converted": (CONVERTED_DIR / "conversion.json").is_file(),
-        "vae": (VAE_DIR / "config.json").is_file() and (VAE_DIR / "model.safetensors").is_file(),
-        "precisions": [p for p in PRECISIONS if (CONVERTED_DIR / f"ar-{p}.safetensors").is_file()],
+        "converted": (converted / "conversion.json").is_file(),
+        "vae": (vae / "config.json").is_file() and (vae / "model.safetensors").is_file(),
+        "precisions": [p for p in PRECISIONS if (converted / f"ar-{p}.safetensors").is_file()],
     }
 
 
-def cover_available() -> dict:
+def cover_available(paths: Paths | None = None) -> dict:
     """Whether the cover flow can run offline: ffmpeg plus both transcription snapshots."""
-    sheetsage = hf_snapshot_dir(SHEETSAGE_REPO, SHEETSAGE_REVISION)
-    mert = hf_snapshot_dir(MERT_REPO, MERT_REVISION)
+    cache_dir = HF_CACHE_DIR if paths is None else paths.hf_cache_dir
+    sheetsage = hf_snapshot_dir(SHEETSAGE_REPO, SHEETSAGE_REVISION, cache_dir)
+    mert = hf_snapshot_dir(MERT_REPO, MERT_REVISION, cache_dir)
     checks = {
         "ffmpeg": FFMPEG is not None,
         "sheetsage2": all((sheetsage / n).is_file() for n in ("config.json", "model.safetensors")),

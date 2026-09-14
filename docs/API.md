@@ -43,11 +43,12 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 | `started_at` | str? | |
 | `finished_at` | str? | |
 | `error` | str? | set when `failed` |
-| `timing` | object? | `{"<stage>": seconds, ..., "abc_tps": float?, "semantic_tps": float?, "audio_seconds": float?}`; set when done |
+| `timing` | object? | `{"plan", "semantic", "synthesize", "decode", "transcribe", "e2e": float?, "abc_tps": float?, "semantic_tps": float?, "audio_seconds": float?}`; set when done; every key present, `null` when not applicable (`transcribe` for non-covers, `abc_tps` for a supplied score) |
 | `truncated` | object? | `{"phase": "abc"\|"semantic", "reason": str}` if generation hit a length limit; else null |
 | `progress` | ProgressEvent? | last event emitted (also for terminal jobs); null if none yet |
 | `artifacts` | object | `{"audio": bool, "score": bool, "plan": bool, "transcription": bool}`; all false until produced |
 | `position` | int? | 0-based queue position while `queued`; null otherwise |
+| `seq` | int | server-wide insertion counter (strictly increasing); order by it when `created_at` ties (variations members share a millisecond) |
 
 ### CreateParams
 
@@ -74,7 +75,7 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 
 `cot` is inherited from the parent; if the parent had `cot=off` the server uses `melody`. Preset/precision/ode_steps
 come from the common submit fields (below), defaulting to the parent's. Stored `params` contains the resolved
-values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`).
+values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg_scale` inherited from the parent).
 
 ### CoverParams
 
@@ -108,7 +109,8 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`).
 
 ### Group
 
-`{"id": str (uuid4 hex), "label": str, "created_at": str, "job_ids": [str]}` — `job_ids` in seed order.
+`{"id": str (uuid4 hex), "label": str, "created_at": str, "job_ids": [str]}` — `job_ids` in submit order
+(= ascending `seq`; equals seed order unless `random_seeds`).
 
 ### ProgressEvent (SSE `data`)
 
@@ -145,18 +147,23 @@ and immediately before `done` with the terminal status.
   "engine":  {"state": "ready", "precision": "bf16", "memory_gib": 11.2, "current_job_id": null},
   "queue":   {"queued": 2, "running": null},
   "presets": [
-    {"name": "quality", "precision": "bf16", "ode_steps": 32, "description": "BF16 AR, 32 ODE steps"},
-    {"name": "fast",    "precision": "8bit", "ode_steps": 8,  "description": "8-bit AR, 8 ODE steps"},
-    {"name": "custom",  "precision": null,   "ode_steps": null, "description": "Choose precision and steps"}
+    {"name": "quality", "label": "Quality", "precision": "bf16", "ode_steps": 32, "description": "BF16 AR, 32 ODE steps"},
+    {"name": "fast",    "label": "Fast",    "precision": "8bit", "ode_steps": 8,  "description": "8-bit AR, 8 ODE steps"},
+    {"name": "custom",  "label": "Custom",  "precision": null,   "ode_steps": null, "description": "Choose precision and steps"}
   ],
-  "models":  {"converted_dir": "/abs/models/converted", "vae_dir": "/abs/models/vae", "present": true},
+  "models":  {"converted_dir": "/abs/models/converted", "vae_dir": "/abs/models/vae", "present": true,
+              "precisions": ["bf16", "8bit"]},
   "cover":   {"available": false, "reasons": ["MERT-v2-FullSong not downloaded"]},
   "ffmpeg":  true,
+  "fake":    false,
   "version": "0.1.0"
 }
 ```
 
-`engine.state ∈ cold|loading|ready|busy`; `precision`/`memory_gib` null when cold. `queue.running` = job id or null.
+`engine.state ∈ cold|loading|ready|busy`; `precision`/`memory_gib` null when cold (`memory_gib` is the MLX active
+memory sampled by the worker at stage boundaries, so it lags slightly). `queue.running` = job id or null.
+`models.precisions` lists the AR weight files present; `fake` is true under `--fake` (then `models.present` and
+`cover.available` are reported true so jobs can be submitted).
 
 ### Settings
 
@@ -177,7 +184,7 @@ Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?}`.
 ```
 → **201** `{"job": Job}` (status `queued`, `position` set).
 
-`kind=variations` → **201** `{"group": Group, "jobs": [Job, …]}` (jobs in seed order, each `kind=create`, `group_id` set).
+`kind=variations` → **201** `{"group": Group, "jobs": [Job, …]}` (jobs in submit/`seq` order, each `kind=create`, `group_id` set).
 
 Errors: 400 validation; 404 unknown `parent_id`/`upload_id`; 409 cover unavailable; 503 models missing.
 
@@ -194,7 +201,8 @@ Deleting a `queued` job cancels it first. Deleting the last member of a group de
 
 ### `POST /api/jobs/{id}/cancel`
 
-- `queued` → status becomes `cancelled` immediately → **200** `{"job": Job}`.
+- `queued` → status becomes `cancelled` immediately → **200** `{"job": Job}`. Open SSE streams for the job
+  receive a `status` event (`status=cancelled`) and `done`.
 - `running` → cancel flag set; status stays `running` until the worker observes it → **202** `{"job": Job}`.
   The SSE stream then delivers `status=cancelled` and `done`.
 - terminal → **409**.
@@ -233,14 +241,17 @@ data: {"job": <Job JSON>}
 | `artifacts.zip` | `application/zip` | whole song dir, `Content-Disposition: attachment; filename="<id>.zip"` |
 | `transcription/score.abc` | `text/plain; charset=utf-8` | cover jobs only; 404 otherwise |
 
-404 when the job or the file does not exist (e.g. job not yet done). `{id}` is the job id.
+404 when the job or the file does not exist (e.g. job not yet done). `{id}` is the job id. These routes also
+answer `HEAD` (players probe with it before requesting ranges).
 
 ### `POST /api/upload`
 
 `multipart/form-data`, single field `file`. Accepted extensions: `mp3 wav flac m4a ogg`; max **200 MB**.
 Stored at `data/uploads/<upload_id>.<ext>`.
 → **201** `{"upload_id": "<uuid4 hex>", "filename": "demo.mp3", "seconds": 187.4, "path_hint": "data/uploads/<id>.mp3"}`
-(`seconds` null if ffprobe unavailable). 400 bad type, 413 too large.
+(`seconds` null if ffprobe unavailable). 400 bad type, 413 too large. The 200 MB cap is checked against
+`Content-Length` before the body is read (browsers always send it for `FormData`); a chunked upload without it is
+only rejected while being copied into `data/uploads/`, after the multipart parser has buffered it to a temp file.
 
 ### `GET /api/settings` → 200 `Settings`.  `PUT /api/settings` body = partial `Settings` → 200 full `Settings` | 400.
 
@@ -294,12 +305,16 @@ Variations: `#/create` with N>1 → `POST /api/jobs {kind:"variations", params:{
 
 ## 6. Test fixtures — fake engine
 
-`yue2_studio.main.create_app(engine=None, *, home=None) -> FastAPI`. When `engine` is given the worker uses it
-instead of constructing `StudioPipeline`; `home` overrides `YUE2_STUDIO_HOME` (tests pass a tmp dir).
-`yue2-studio --fake` starts the server with the fake engine so the frontend can be developed without models.
+`yue2_studio.main.create_app(engine=None, *, home=None, fake=False, fake_delay=0.05, static_dir=None) -> FastAPI`.
+When `engine` is given the worker uses it instead of constructing `StudioPipeline`; `fake=True` builds a
+`FakeEngine(delay=fake_delay)`; `home` overrides `YUE2_STUDIO_HOME` (tests pass a tmp dir; it is applied through a
+`config.Paths` object on `app.state.paths`, module constants are untouched); `static_dir` overrides
+`yue2_studio/static`. The real engine module (which imports mlx) is only imported when neither `engine` nor
+`fake` is given. `yue2-studio --fake` starts the server with the fake engine (0.3 s per event) so the frontend
+can be developed without models.
 
-Engine interface (the only methods the worker calls; `FakeEngine` in `tests/fake_engine.py` implements it).
-This mirrors the **real** `yue2_studio/engine.py`:
+Engine interface (the only methods the worker calls; `FakeEngine` in `yue2_studio/fake.py` implements it,
+`FakeEngine(delay=0.05, fail=False)`). This mirrors the **real** `yue2_studio/engine.py`:
 
 ```python
 class Engine(Protocol):
@@ -345,6 +360,8 @@ preset}` produced by `config.resolve_preset(name, precision=None, ode_steps=None
 | `summary.json` | at the end | the dict returned by `create_song` / `cover_song` |
 | `transcription/` | covers only, before the song stages | `score.abc`, `result.json`, `melody.mid`, `*.lab`, `events.json`, … |
 | `request.json`, `cover.json` | covers only | resolved request incl. transcribed `abc`; cover receipt |
+| `job.json` | by the worker, at job start | the stored job (id, kind, params, preset/precision/ode_steps, seed, ids, created_at) |
+| `audio.mp3` (in `song/`), `artifacts.zip` | lazily by the HTTP routes | cached MP3 transcode; zip of the song dir (excluded from itself) |
 
 The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` → `song/score.abc` (fall back to
 `plan/score.abc` for a failed job), `plan.json` → `plan/plan.json`, `transcription/score.abc` → same path.
@@ -370,6 +387,12 @@ The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` �
 The worker derives the HTTP `Job.timing` (`{"plan": 15.8, "semantic": 35.9, "synthesize": 27.2, "decode": 3.4,
 "transcribe": 4.1, "e2e": 82.4, "abc_tps": 131.1, "semantic_tps": 128.8, "audio_seconds": 184.7}`) and `Job.truncated`
 (`{"phase": "semantic", "reason": "generation limit reached"}` for the first true flag, else null) from it.
+
+Worker behaviour worth knowing: jobs run strictly serially in submit order; the worker emits the `status`
+`stage="load"` event whenever the engine is cold or the requested precision differs from the resident one; a
+non-cancellation engine error unloads the engine (state `cold`) and the next job rebuilds it. Shutdown (incl.
+`--reload`) cancels only the running job and leaves queued rows `queued`; on server start any row still `queued`
+is re-enqueued and any row left `running` is marked `failed` ("server restarted…").
 
 **Raw engine events** (`on_event(dict)`; keys absent when null, no `job_id`):
 
