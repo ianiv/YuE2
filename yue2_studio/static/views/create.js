@@ -89,7 +89,7 @@ export async function createView({ el, query, app }) {
     let node;
     if (["done", "failed", "cancelled"].includes(job.status)) node = doneCard(job);
     else {
-      const c = liveCard(job, { onFinish: (c2, j) => show(j, c2.el), onGone: async (c2) => { try { show((await api.job(c2.job.id)).job, c2.el); } catch { dismiss(c2.job); } } });
+      const c = liveCard(job, { scoreCollapsed: true, onFinish: (c2, j) => show(j, c2.el), onGone: async (c2) => { try { show((await api.job(c2.job.id)).job, c2.el); } catch { dismiss(c2.job); } } });
       live.set(job.id, c); node = c.el;
     }
     if (replace && replace.parentNode === results) replace.replaceWith(node); else results.prepend(node);

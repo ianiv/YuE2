@@ -60,8 +60,9 @@ to N > 1 to submit N jobs at once with seeds `seed, seed+1, …` (or independent
 they are grouped in the queue and library.
 
 Create is the iteration page: submitting keeps you on it with the form intact, and the job appears
-in the **Results** column beside the form — live progress and the streaming score while it runs,
-then an inline player the moment it finishes, with *Use this seed* and *Regenerate from its score*
+in the **Results** column beside the form — live progress while it runs (the streaming score is
+collapsed by default to keep several variations compact; *Show score* expands it per card), then an
+inline player the moment it finishes, with *Use this seed* and *Regenerate from its score*
 shortcuts. Recent results persist across reloads (last 20); the Queue and Library still show
 everything.
 
