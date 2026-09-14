@@ -1,5 +1,8 @@
 import { api } from "../api.js";
 import { fill, h, presetPicker, randomSeed, rememberGroup, store, toast, toastError } from "../ui.js";
+import { liveCard, resultCard } from "./jobcard.js";
+
+const RECENT_MAX = 20;
 
 const GENRES = ["pop, female vocal, upbeat", "lo-fi hip hop", "orchestral cinematic", "indie rock, male vocal", "jazz trio", "edm, synth", "warm piano ballad", "city pop, groovy bass"];
 const SECTIONS = ["[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Bridge]", "[Interlude]", "[Outro]"];
@@ -45,7 +48,7 @@ export async function createView({ el, query, app }) {
 
   const insertTag = (tag) => { const t = f.lyrics, s = t.selectionStart, v = t.value; const pre = v.slice(0, s), post = v.slice(t.selectionEnd); const nl = !pre ? "" : pre.endsWith("\n\n") ? "" : pre.endsWith("\n") ? "\n" : "\n\n"; t.value = pre + nl + tag + "\n" + post; t.focus(); t.selectionStart = t.selectionEnd = (pre + nl + tag + "\n").length; };
 
-  const form = h("form", { class: "cols", onsubmit: onSubmit },
+  const form = h("form", { class: "stack", onsubmit: onSubmit },
     h("div", { class: "stack" },
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Title"), f.title),
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Style"), h("span", {}, "required")), f.style),
@@ -53,7 +56,7 @@ export async function createView({ el, query, app }) {
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Lyrics"), h("span", {}, "section tags below")), f.lyrics),
       h("div", { class: "chips", "aria-label": "Insert section tag" }, SECTIONS.map((t) => h("button", { type: "button", class: "chip", onclick: () => insertTag(t) }, t))),
       abcDetails),
-    h("div", { class: "panel sticky stack" },
+    h("div", { class: "panel stack" },
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Mode (chain of thought)"), cotSeg,
         h("span", { class: "hint" }, "full = plan score + arrangement, melody = plan melody only, off = no score")),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
@@ -65,7 +68,44 @@ export async function createView({ el, query, app }) {
         h("label", { class: "check", style: "align-self:end;padding-bottom:6px" }, f.random, "random seeds")),
       variationsHint,
       submit));
-  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Create"), h("span", { class: "sub" }, "Describe the style, write lyrics with section tags, pick a preset.")), form);
+  // Results: jobs submitted from this page (persisted ids), newest first; live cards while running.
+  const results = h("div", { class: "stack" });
+  const resultsEmpty = h("div", { class: "empty" }, "Songs you create here appear in this column — play them as soon as they finish, then tweak and submit another take.");
+  const resultsHead = h("div", { class: "row between" }, h("h3", {}, "Results"), h("button", { type: "button", class: "ghost sm", onclick: clearResults }, "Clear list"));
+  const live = new Map(); // id -> liveCard
+  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Create"), h("span", { class: "sub" }, "Describe the style, write lyrics with section tags, pick a preset — results play right here.")),
+    h("div", { class: "cols results-layout" }, form, h("div", { class: "stack results-col" }, resultsHead, results, resultsEmpty)));
+
+  const recent = () => store.get("recent", []);
+  const setRecent = (ids) => store.set("recent", ids.slice(0, RECENT_MAX));
+  function clearResults() { live.forEach((c) => c.close()); live.clear(); setRecent([]); fill(results); resultsEmpty.hidden = false; resultsHead.querySelector("button").hidden = true; }
+  function dismiss(job) { setRecent(recent().filter((id) => id !== job.id)); const el = results.querySelector(`[data-id="${job.id}"]`); el && el.remove(); const c = live.get(job.id); if (c) { c.close(); live.delete(job.id); } syncEmpty(); }
+  function syncEmpty() { const n = results.children.length; resultsEmpty.hidden = n > 0; resultsHead.querySelector("button").hidden = n === 0; }
+  function useSeed(job) { f.seed.value = job.seed; collect(); f.seed.focus(); toast(`Seed ${job.seed} copied into the form`, "info", { timeout: 2500 }); }
+  const doneCard = (job) => resultCard(job, { onUseSeed: useSeed, onDismiss: dismiss });
+  /** Show a job in the results column (prepend unless `replace` gives an existing node). */
+  function show(job, replace = null) {
+    const prev = live.get(job.id); if (prev) { prev.close(); live.delete(job.id); }
+    let node;
+    if (["done", "failed", "cancelled"].includes(job.status)) node = doneCard(job);
+    else {
+      const c = liveCard(job, { onFinish: (c2, j) => show(j, c2.el), onGone: async (c2) => { try { show((await api.job(c2.job.id)).job, c2.el); } catch { dismiss(c2.job); } } });
+      live.set(job.id, c); node = c.el;
+    }
+    if (replace && replace.parentNode === results) replace.replaceWith(node); else results.prepend(node);
+    syncEmpty();
+  }
+  async function restore() {
+    const ids = recent(); if (!ids.length) { syncEmpty(); return; }
+    const found = [];
+    for (const id of ids.slice().reverse()) { // oldest first so prepend leaves newest on top
+      try { const { job } = await api.job(id); found.unshift(id); show(job); }
+      catch (e) { if (e.status !== 404) console.warn("recent job", id, e.message); }
+    }
+    setRecent(found);
+  }
+  await restore();
+  const tick = setInterval(() => live.forEach((c) => c.paint()), 1000);
 
   function collect() {
     const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, cot, seed: f.seed.value === "" ? "" : Number(f.seed.value),
@@ -84,17 +124,21 @@ export async function createView({ el, query, app }) {
     const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps };
     submit.disabled = true;
     try {
+      let jobs;
       if (v.count > 1) {
         const r = await api.submit({ kind: "variations", params: { count: v.count, base, random_seeds: v.random_seeds, label: null }, ...common });
-        rememberGroup(r.group, r.jobs);
+        rememberGroup(r.group, r.jobs); jobs = r.jobs;
         toast(`Queued ${r.jobs.length} variations`, "ok");
       } else {
         const r = await api.submit({ kind: "create", params: base, ...common });
+        jobs = [r.job];
         toast(`Queued “${r.job.title || r.job.id.slice(0, 8)}”`, "ok");
       }
-      location.hash = "#/queue";
+      setRecent([...jobs.map((j) => j.id).reverse(), ...recent().filter((id) => !jobs.some((j) => j.id === id))]);
+      for (const job of jobs) show(job);
+      results.parentNode.scrollTop = 0;
     } catch (err) { toastError(err); }
-    submit.disabled = false;
+    submit.disabled = false; // queue another take right away
   }
-  return {};
+  return { unmount() { clearInterval(tick); live.forEach((c) => c.close()); } };
 }
