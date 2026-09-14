@@ -1,0 +1,15 @@
+# runtime state
+data/
+models/
+.worktrees/
+.orchestrate/knowledge/
+.orchestrate/session.json
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# os / editors
+.DS_Store
