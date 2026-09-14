@@ -7,7 +7,7 @@ export async function settingsView({ el, app }) {
   catch (e) { toastError(e); s = { default_preset: "quality", memory_budget_gib: 24, require_ac: false, theme: store.get("theme", "system") }; }
   const f = {
     preset: h("select", { id: "st-preset" }, ["quality", "fast", "custom"].map((p) => h("option", { value: p, selected: p === s.default_preset }, p))),
-    mem: h("input", { id: "st-mem", type: "number", min: 4, max: 44, step: 1, value: s.memory_budget_gib }),
+    mem: h("input", { id: "st-mem", type: "number", min: 6, max: 44, step: 1, value: s.memory_budget_gib }),
     ac: h("input", { id: "st-ac", type: "checkbox", checked: !!s.require_ac }),
     theme: h("select", { id: "st-theme", onchange: (e) => applyTheme(e.target.value) }, [["system", "Follow system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => h("option", { value: v, selected: v === (s.theme || "system") }, l))),
   };
@@ -23,7 +23,7 @@ export async function settingsView({ el, app }) {
   } },
     h("h3", {}, "Generation"),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Default preset"), f.preset),
-    h("label", { class: "field" }, h("span", { class: "lbl" }, "Memory budget (GiB, 4–44)"), f.mem, h("span", { class: "hint" }, "MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈11 GiB.")),
+    h("label", { class: "field" }, h("span", { class: "lbl" }, "Memory budget (GiB, 6–44)"), f.mem, h("span", { class: "hint" }, "MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈11 GiB.")),
     h("label", { class: "check" }, f.ac, "Require AC power before running jobs"),
     h("h3", {}, "Appearance"),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Theme"), f.theme),

@@ -5,8 +5,8 @@ on Apple Silicon. It wraps [mlx-Yue](https://github.com/vanch007/mlx-Yue) (the n
 the YuE2 pipeline: ABC score planning → semantic tokens → flow-matching acoustics → 48 kHz stereo
 VAE decode) in a single-process FastAPI server with a job queue, live progress over Server-Sent
 Events, a song library, score editing with regeneration, seed variations and audio-to-song covers.
-Everything runs on your Mac; nothing leaves it except the optional soundfont download for the
-score preview (see below).
+Everything runs on your Mac; nothing leaves it except loading abcjs from cdnjs (the UI needs
+internet for score rendering) and the optional soundfont download for the score preview (see below).
 
 ## Requirements
 
@@ -86,7 +86,7 @@ song is generated from the transcription:
 Cover is disabled (and the API answers 409) until the transcription models and ffmpeg are present;
 `#/settings` and `GET /api/status` say what is missing.
 
-**Settings** (`#/settings`) — default preset, memory budget (4–44 GiB), require-AC-power, theme,
+**Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power, theme,
 plus a live engine panel (state, precision, memory, current job, model paths).
 
 ### Presets
@@ -95,7 +95,7 @@ plus a live engine panel (state, precision, memory, current job, model paths).
 |---|---|---|---|
 | **Quality** | `bf16` | 32 | Reference quality; ~1× realtime on an M5 Max. |
 | **Fast** | `8bit` | 8 | ~2× faster than realtime; the 8-bit AR still loads the BF16 AR for NAR conditioning. |
-| **Custom** | `bf16` / `8bit` / `4bit` | 4–64 | Precision is fixed per resident pipeline (changing it rebuilds, ~0.1 s); steps are per job. |
+| **Custom** | `bf16` / `8bit` / `4bit` | 4–64 | Precision is fixed per resident pipeline (changing it rebuilds, well under a second); steps are per job. |
 
 ### Measured timings (M5 Max, 48 GB, macOS 27, mlx-Yue `ab0f058`, memory budget 24 GiB)
 
@@ -133,8 +133,8 @@ uv run yue2-studio [--host 127.0.0.1] [--port 8765] [--open] [--fake] [--fake-de
 `YUE2_STUDIO_HOME` sets the directory that holds `data/` (SQLite `app.db`, `songs/<job_id>/`,
 `uploads/`) and `models/`. It defaults to the main git checkout root — even when running from a
 worktree under `.worktrees/`, so worktrees share the downloaded weights — or, without git, to the
-parent of the `yue2_studio` package. Two servers sharing one home share a database and would steal
-each other's jobs; give each its own home (with `models/` symlinked) if you must run two.
+parent of the `yue2_studio` package. Don't point two servers at one home (see
+[Troubleshooting](#troubleshooting)).
 
 ## HTTP API
 
@@ -196,7 +196,8 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
   `config` first; if you embed the package elsewhere, import `yue2_studio.config` before `mlx`.
 - **`MemoryError: Process footprint exceeds budget` / job fails then the engine shows `cold`.**
   The pipeline's memory watchdog tripped the configured budget (Settings → Memory budget, default
-  24 GiB; the guard requires budget ≤ total RAM − 4 GiB, so use ≤ 20 on a 24 GB machine). Peak use
+  24 GiB, settable 6–44; the guard requires 5 GiB < budget ≤ total RAM − 4 GiB, so use ≤ 20 on a
+  24 GB machine). Peak use
   is ~11 GiB for generation; covers release the song models before loading SheetSage2 + MERT
   (~3 GiB) and reload them lazily afterwards. After
   any non-cancellation failure the pipeline is discarded (the guard latches the error) and the next
@@ -214,8 +215,8 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
   `mlx-yue`, but `lyra.pipeline` / `lyra.commands` still call
   `importlib.metadata.version("lyra-yue2")`. The `compat/lyra-yue2` directory is an empty,
   metadata-only distribution with that name so the lookup succeeds without patching mlx-Yue. Keep it.
-- **Two servers on one home.** They share `data/app.db` and steal each other's jobs; use
-  `YUE2_STUDIO_HOME` per server.
+- **Two servers on one home.** They share `data/app.db` and steal each other's jobs; give each its
+  own `YUE2_STUDIO_HOME` (with `models/` symlinked to the shared weights).
 
 ## Licences and attribution
 
@@ -223,13 +224,15 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
   MLX conversion [vanch007/mlx-Yue2-3B](https://huggingface.co/vanch007/mlx-Yue2-3B)) are released
   under **[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — non-commercial use
   only**. Music you generate with this studio is subject to that licence; check the model card
-  before any commercial use. The VAE ([m-a-p/YuE2-Vae](https://huggingface.co/m-a-p/YuE2-Vae)) and
-  the transcription models ([SheetSage2](https://huggingface.co/m-a-p/SheetSage2),
+  before any commercial use. The VAE ([m-a-p/YuE2-Vae](https://huggingface.co/m-a-p/YuE2-Vae)) is
+  **also CC BY-NC 4.0** (`models/converted/LICENSE` covers both). The transcription models
+  ([SheetSage2](https://huggingface.co/m-a-p/SheetSage2),
   [MERT-v2-FullSong](https://huggingface.co/m-a-p/MERT-v2-FullSong)) carry their own licences on
   their model cards.
 - [mlx-Yue](https://github.com/vanch007/mlx-Yue) (the engine this studio wraps, pinned at
   `ab0f058`) is licensed under the
   [Apache License 2.0](https://github.com/vanch007/mlx-Yue/blob/main/LICENSE). The example
   requests in `examples/` are copied from it.
-- [abcjs](https://github.com/paulrosen/abcjs) (MIT) renders and plays the scores in the browser;
-  its MIDI preview downloads soundfonts from `paulrosen.github.io/midi-js-soundfonts` at runtime.
+- [abcjs](https://github.com/paulrosen/abcjs) (MIT) renders and plays the scores in the browser. It
+  is loaded from cdnjs on every page load, and its MIDI preview downloads soundfonts from
+  `paulrosen.github.io/midi-js-soundfonts` at runtime — the only network access the studio makes.

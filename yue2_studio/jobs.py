@@ -193,7 +193,7 @@ class SubmitRequest(_Params):
 
 class SettingsModel(_Params):
     default_preset: Literal["quality", "fast", "custom"] = "quality"
-    memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB, ge=4, le=44)
+    memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB, ge=6, le=44)
     require_ac: bool = config.DEFAULT_REQUIRE_AC
     theme: Literal["system", "light", "dark"] = "system"
 

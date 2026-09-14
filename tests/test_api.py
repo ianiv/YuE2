@@ -105,7 +105,8 @@ async def test_settings_get_and_partial_put(client):
 
 
 @pytest.mark.parametrize(("patch", "ok"), [
-    ({"memory_budget_gib": 4}, True), ({"memory_budget_gib": 3.99}, False),
+    ({"memory_budget_gib": 6}, True), ({"memory_budget_gib": 5.99}, False),
+    ({"memory_budget_gib": 4}, False),
     ({"memory_budget_gib": 44}, True), ({"memory_budget_gib": 44.01}, False),
     ({"memory_budget_gib": 100}, False), ({"memory_budget_gib": "lots"}, False),
     ({"default_preset": "fast"}, True), ({"default_preset": "ultra"}, False),
@@ -510,8 +511,21 @@ async def test_sse_keepalive_comment_frames(make_app, home, monkeypatch):
     async with make_app(FakeEngine(delay=0), home=home, lifespan=False) as (app, client):
         app.state.bus.bind(asyncio.get_running_loop())
         job = (await client.post("/api/jobs", json={"kind": "create", "params": BASE})).json()["job"]
+        seen = asyncio.Event()
+        original = api_module.ServerSentEvent
+
+        class Counting(original):  # observe keepalive frames as the route builds them
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                if kwargs.get("comment") == "keepalive":
+                    Counting.count += 1
+                    if Counting.count >= 2:
+                        seen.set()
+
+        Counting.count = 0
+        monkeypatch.setattr(api_module, "ServerSentEvent", Counting)
         stream = asyncio.create_task(client.get(f"/api/jobs/{job['id']}/events"))
-        await asyncio.sleep(0.06)
+        await asyncio.wait_for(seen.wait(), 5)  # two keepalives sent, then cancel ends the stream
         r = await client.post(f"/api/jobs/{job['id']}/cancel")
         assert r.status_code == 200
         raw = (await asyncio.wait_for(stream, 5)).content
@@ -531,10 +545,11 @@ async def test_sse_late_subscriber_sees_last_event_first(client, api, app):
     app.state.engine.delay = 0.02
     job = await api.create()
     await api.wait_status(job["id"], "running")
-    await asyncio.sleep(0.05)
+    while ((await api.get(job["id"]))["progress"] or {}).get("type") != "stage":  # first stage event
+        await asyncio.sleep(0.005)
     progress, done = await api.events(job["id"])
     assert done["status"] == "done"
-    assert progress[0]["type"] != "status" or progress[0]["status"] != "running"  # not from the beginning
+    assert progress[0]["type"] == "stage"  # cached last event first, not the run-from-the-beginning status
     assert progress[0]["job_id"] == job["id"] and progress[-1]["status"] == "done"
     assert (await api.get(job["id"]))["progress"]["status"] == "done"
 

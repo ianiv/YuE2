@@ -31,22 +31,22 @@ def test_importing_http_side_modules_never_loads_mlx(module):
     assert result == {"loaded": [], "tf32": "0"}
 
 
-def test_fake_app_never_imports_mlx():
-    result = probe("from yue2_studio.main import create_app; create_app(fake=True, home=tempfile.mkdtemp())")
+def test_fake_app_never_imports_mlx(tmp_path):
+    result = probe(f"from yue2_studio.main import create_app; create_app(fake=True, home={str(tmp_path)!r})")
     assert result == {"loaded": [], "tf32": "0"}
 
 
-def test_fake_job_end_to_end_never_imports_mlx():
+def test_fake_job_end_to_end_never_imports_mlx(tmp_path):
     body = """
 from yue2_studio import config
 from yue2_studio.fake import FakeEngine
-home = tempfile.mkdtemp()
+home = HOME
 options = config.resolve_preset("fast")
 summary = FakeEngine(delay=0).create_song({"style": "s", "lyrics": "l", "cot": "off", "seed": 1}, home,
                                           options=options)
 assert summary["status"] == "complete"
 """
-    assert probe(body) == {"loaded": [], "tf32": "0"}
+    assert probe(body.replace("HOME", repr(str(tmp_path)))) == {"loaded": [], "tf32": "0"}
 
 
 def test_real_engine_is_only_imported_lazily():

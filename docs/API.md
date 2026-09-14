@@ -168,7 +168,8 @@ memory sampled by the worker at stage boundaries, so it lags slightly). `queue.r
 ### Settings
 
 `{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system"}`
-(`theme ∈ system|light|dark`, `memory_budget_gib` number 4..44, returned as a float, e.g. `24.0`). `PUT` accepts any
+(`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
+total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`). `PUT` accepts any
 subset, ignores unknown keys, and returns the full object; a rejected patch (400) changes nothing.
 
 ## 3. Endpoints
