@@ -168,7 +168,9 @@ memory sampled by the worker at stage boundaries, so it lags slightly). `queue.r
 ### Settings
 
 `{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system"}`
-(`theme ∈ system|light|dark`, `memory_budget_gib` number 4..44). `PUT` accepts any subset and returns the full object.
+(`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
+total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`). `PUT` accepts any
+subset, ignores unknown keys, and returns the full object; a rejected patch (400) changes nothing.
 
 ## 3. Endpoints
 
@@ -238,7 +240,7 @@ data: {"job": <Job JSON>}
 | `audio.mp3` | `audio/mpeg` | lazily transcoded with ffmpeg into the song dir on first request; 503 if ffmpeg missing |
 | `score.abc` | `text/plain; charset=utf-8` | final (or supplied) ABC |
 | `plan.json` | `application/json` | engine plan (stage 1 output) |
-| `artifacts.zip` | `application/zip` | whole song dir, `Content-Disposition: attachment; filename="<id>.zip"` |
+| `artifacts.zip` | `application/zip` | whole song dir as written so far (a running or failed job yields `job.json`, `plan/`, …), `Content-Disposition: attachment; filename="<id>.zip"`; 404 only while the dir is empty (queued) |
 | `transcription/score.abc` | `text/plain; charset=utf-8` | cover jobs only; 404 otherwise |
 
 404 when the job or the file does not exist (e.g. job not yet done). `{id}` is the job id. These routes also

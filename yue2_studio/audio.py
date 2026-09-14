@@ -61,6 +61,7 @@ def transcode_mp3(flac_path: Path, mp3_path: Path | None = None, *, bitrate: str
     with _lock_for(str(mp3_path)):
         if mp3_path.is_file() and mp3_path.stat().st_mtime >= flac_path.stat().st_mtime:
             return mp3_path
+        mp3_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = mp3_path.with_name(f".{mp3_path.name}.tmp.mp3")
         cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(flac_path), "-vn",
                "-codec:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3", str(tmp)]
