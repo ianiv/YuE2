@@ -1,0 +1,11 @@
+{
+  "id": "quickstart",
+  "style": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM",
+  "lyrics": "[Verse]\nNeon fades along the lane\nFootsteps keep the time of rain\nFold the night and leave it here\nMorning has a sky to clear\n\n[Chorus]\nLet the day come into view\nEvery road begins with you\nHold a little room for light\nWe will sing beyond the night",
+  "cot": "full",
+  "seed": 831001,
+  "abc": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|\n",
+  "semantic_sampling": {
+    "max_tokens": 400
+  }
+}
