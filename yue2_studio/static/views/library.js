@@ -20,9 +20,9 @@ export function groupIndex(jobs) {
 export async function libraryView({ el, query }) {
   const filters = { kind: "", group: query.group || "", preset: "", q: "" };
   const f = {
-    kind: h("select", { id: "l-kind", onchange: (e) => { filters.kind = e.target.value; paint(); } }, [["", "All kinds"], ["create", "Create"], ["regenerate", "Regenerate"], ["cover", "Cover"]].map(([v, t]) => h("option", { value: v }, t))),
+    kind: h("select", { id: "l-kind", onchange: (e) => { filters.kind = e.target.value; load(); } }, [["", "All kinds"], ["create", "Create"], ["regenerate", "Regenerate"], ["cover", "Cover"]].map(([v, t]) => h("option", { value: v }, t))),
     preset: h("select", { id: "l-preset", onchange: (e) => { filters.preset = e.target.value; paint(); } }, [["", "All presets"], ["quality", "Quality"], ["fast", "Fast"], ["custom", "Custom"]].map(([v, t]) => h("option", { value: v }, t))),
-    group: h("select", { id: "l-group", onchange: (e) => { filters.group = e.target.value; paint(); } }),
+    group: h("select", { id: "l-group", onchange: (e) => { filters.group = e.target.value; load(); } }),
     q: h("input", { id: "l-q", type: "search", placeholder: "Search title, style, lyrics…", oninput: (e) => { filters.q = e.target.value.toLowerCase(); paint(); } }),
   };
   const grid = h("div", { class: "grid-cards" });
@@ -36,16 +36,17 @@ export async function libraryView({ el, query }) {
     h("div", { class: "row", style: "margin-bottom:14px" }, h("div", { style: "flex:1 1 200px" }, f.q), f.kind, f.preset, f.group),
     grid, h("div", { class: "row", style: "justify-content:center;margin-top:14px" }, more), h("div", { style: "height:20px" }), failed);
 
-  let jobs = [], gidx = {}, total = 0;
+  let jobs = [], gidx = {}, total = 0, knownGroups = new Set();
   async function load(append = false) {
     more.disabled = true;
     try {
       const offset = append ? jobs.length : 0;
-      const [done, bad] = await Promise.all([api.jobs({ status: "done", limit: PAGE, offset }), append ? null : api.jobs({ status: "failed,cancelled", limit: 100 })]);
+      const [done, bad] = await Promise.all([api.jobs({ status: "done", kind: filters.kind, group: filters.group, limit: PAGE, offset }), append ? null : api.jobs({ status: "failed,cancelled", limit: 100 })]);
       jobs = append ? jobs.concat(done.jobs) : done.jobs; total = done.total; gidx = groupIndex(jobs);
       more.hidden = jobs.length >= total; more.disabled = false;
       more.textContent = `Load more (${jobs.length} of ${total})`;
-      const groups = [...new Set(jobs.map((j) => j.group_id).filter(Boolean))];
+      jobs.forEach((j) => j.group_id && knownGroups.add(j.group_id));
+      const groups = [...knownGroups];
       fill(f.group, h("option", { value: "" }, "All groups"), groups.map((g) => h("option", { value: g, selected: g === filters.group }, groupLabel(g) ? fmt.excerpt(groupLabel(g), 30) : `group ${g.slice(0, 6)}`)));
       f.group.hidden = groups.length === 0;
       paint();
@@ -57,10 +58,10 @@ export async function libraryView({ el, query }) {
   }
 
   function paint() {
-    const shown = jobs.filter((j) => (!filters.kind || j.kind === filters.kind) && (!filters.preset || j.preset === filters.preset) && (!filters.group || j.group_id === filters.group)
+    const shown = jobs.filter((j) => (!filters.preset || j.preset === filters.preset)
       && (!filters.q || [jobTitle(j), j.params.style, j.params.lyrics].join("\n").toLowerCase().includes(filters.q)));
     count.textContent = jobs.length < total ? `${shown.length} shown of ${jobs.length} loaded (${total} total)` : `${shown.length} of ${total} songs`;
-    fill(grid, shown.length ? shown.map(songCard) : h("div", { class: "empty", style: "grid-column:1/-1" }, jobs.length ? "No songs match these filters." : ["No finished songs yet. ", h("a", { href: "#/create" }, "Create one")]));
+    fill(grid, shown.length ? shown.map(songCard) : h("div", { class: "empty", style: "grid-column:1/-1" }, jobs.length || filters.kind || filters.group ? "No songs match these filters." : ["No finished songs yet. ", h("a", { href: "#/create" }, "Create one")]));
   }
 
   function songCard(j) {
@@ -68,7 +69,7 @@ export async function libraryView({ el, query }) {
     return h("div", { class: "card" },
       h("div", { class: "row between" },
         h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j)),
-        h("div", { class: "row", style: "gap:4px" }, h("span", { class: "tag" }, j.kind), g ? h("a", { class: "tag accent", href: `#/library?group=${g.gid}`, title: "Show this group", onclick: (e) => { e.preventDefault(); filters.group = g.gid; f.group.value = g.gid; paint(); } }, `var ${g.n}/${g.total}`) : null)),
+        h("div", { class: "row", style: "gap:4px" }, h("span", { class: "tag" }, j.kind), g ? h("a", { class: "tag accent", href: `#/library?group=${g.gid}`, title: "Show this group", onclick: (e) => { e.preventDefault(); filters.group = g.gid; f.group.value = g.gid; load(); } }, `var ${g.n}/${g.total}`) : null)),
       h("p", { class: "small muted" }, fmt.excerpt(j.params.style, 90)),
       h("audio", { controls: true, preload: "none", src: songUrl(j.id, "audio.flac") }),
       h("div", { class: "meta" },

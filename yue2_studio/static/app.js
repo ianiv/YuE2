@@ -1,6 +1,6 @@
 // Router, header status, theme.
 import { api } from "./api.js";
-import { applyTheme, clear, fill, h, store } from "./ui.js";
+import { applyTheme, fill, h, store } from "./ui.js";
 import { createView } from "./views/create.js";
 import { queueView } from "./views/queue.js";
 import { libraryView } from "./views/library.js";
@@ -47,8 +47,9 @@ async function route() {
     const active = a.getAttribute("href") === `#/${name}` || (name === "song" && a.getAttribute("href") === "#/library");
     if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  const view = clear(document.getElementById("view"));
-  view.append(h("p", { class: "muted" }, "Loading…"));
+  // Fresh container per route: a superseded view that paints after its await hits a detached node.
+  const view = h("div", { class: "route" }, h("p", { class: "muted" }, "Loading…"));
+  fill(document.getElementById("view"), view);
   try {
     const v = await routes[name]({ el: view, param, query, app });
     if (gen !== routeGen) { v && v.unmount && v.unmount(); return; } // hash moved on while loading
