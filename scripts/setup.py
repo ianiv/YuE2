@@ -74,7 +74,7 @@ def download(with_cover: bool, force: bool = False) -> None:
                               allow_patterns=["config.json", "model.safetensors"])
 
 
-def doctor(verify_hashes: bool) -> dict:
+def doctor(verify_hashes: bool, require_ffmpeg: bool = False) -> dict:
     """Same checks as ``lyra.commands.doctor`` (verify_conversion / model_identity) plus studio extras."""
     import importlib.metadata
 
@@ -90,8 +90,12 @@ def doctor(verify_hashes: bool) -> dict:
         "macos_version": mac_tuple >= (26, 2),
         "metal": mx.metal.is_available(),
         "tf32_disabled": config.os.environ.get("MLX_ENABLE_TF32") == "0",
-        "ffmpeg": config.FFMPEG is not None,
     }
+    warnings = []
+    if require_ffmpeg:
+        checks["ffmpeg"] = config.FFMPEG is not None
+    elif config.FFMPEG is None:
+        warnings.append("ffmpeg not found on PATH; needed only for covers (transcription) and mp3 export")
     report: dict = {
         "platform": platform.platform(),
         "macos": mac,
@@ -100,6 +104,7 @@ def doctor(verify_hashes: bool) -> dict:
         "home": str(config.HOME),
         "ffmpeg": config.FFMPEG,
         "checks": checks,
+        "warnings": warnings,
     }
     try:
         if verify_hashes:
@@ -140,8 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.skip_download:
         download(args.with_cover, force=args.force)
-    report = doctor(verify_hashes=not args.no_verify_hashes)
+    report = doctor(verify_hashes=not args.no_verify_hashes, require_ffmpeg=args.with_cover)
     print(json.dumps(report, indent=2))
+    for warning in report["warnings"]:
+        print(f"[setup] warning: {warning}", file=sys.stderr)
     if report["status"] != "pass":
         failed = sorted(k for k, ok in report["checks"].items() if not ok)
         print(f"[setup] doctor FAILED: {', '.join(failed)}", file=sys.stderr)

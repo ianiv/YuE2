@@ -39,6 +39,9 @@ def _repo_root() -> Path:
 
     ``git rev-parse --git-common-dir`` points at the primary ``.git`` directory for every
     worktree, so its parent is the shared repository root that owns ``data/`` and ``models/``.
+    Without git (no binary, not a checkout, e.g. an installed wheel) the fallback is the parent of
+    the ``yue2_studio`` package, i.e. whichever checkout the code runs from: a worktree when run
+    from one. Set ``YUE2_STUDIO_HOME`` to override either result explicitly.
     """
     package_dir = Path(__file__).resolve().parent
     try:

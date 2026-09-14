@@ -206,6 +206,10 @@ class StudioPipeline(YuE2Pipeline):
     def check_execution(self) -> None:
         self._check_execution()
 
+    def release_models(self) -> None:
+        """Drop resident AR/NAR/VAE weights (upstream ``_release_models``); they reload lazily (mmap)."""
+        self._release_models()
+
 
 def _clear_gpu() -> None:
     gc.collect()
@@ -221,8 +225,12 @@ class Engine:
 
     STATES = ("cold", "loading", "ready", "busy")
 
-    def __init__(self, *, converted_dir: Path = config.CONVERTED_DIR, vae_dir: Path = config.VAE_DIR):
-        self.converted_dir, self.vae_dir = Path(converted_dir), Path(vae_dir)
+    def __init__(self, *, converted_dir: Path | None = None, vae_dir: Path | None = None,
+                 pipeline_factory: Callable[..., Any] | None = None):
+        self.converted_dir = Path(converted_dir if converted_dir is not None else config.CONVERTED_DIR)
+        self.vae_dir = Path(vae_dir if vae_dir is not None else config.VAE_DIR)
+        # ``pipeline_factory`` lets tests inject a fake pipeline; it receives StudioPipeline's arguments.
+        self._pipeline_factory = pipeline_factory or StudioPipeline
         self._pipe: StudioPipeline | None = None
         self._build_key: tuple | None = None
         self._state = "cold"
@@ -255,7 +263,7 @@ class Engine:
             if self._pipe is None:
                 self._state = "loading"
                 try:
-                    self._pipe = StudioPipeline(
+                    self._pipe = self._pipeline_factory(
                         self.converted_dir, self.vae_dir, precision=options.precision,
                         memory_budget_gib=options.memory_budget_gib, require_ac=options.require_ac,
                         progress=False, on_event=on_event,
@@ -288,7 +296,7 @@ class Engine:
                     mlx_peak_bytes=mx.get_peak_memory())
         return info
 
-    # -- jobs ---------------------------------------------------------------------------------
+    # -- request helpers ------------------------------------------------------------------------
 
     @staticmethod
     def _split_request(request: dict) -> tuple[dict, dict, Any, Any]:
@@ -302,6 +310,41 @@ class Engine:
             data["style"] = data.pop("tags")
         return data, dict(generation), abc_sampling, semantic_sampling
 
+    # -- failure handling ----------------------------------------------------------------------
+
+    def _after_failure(self, pipe, error: BaseException) -> None:
+        """Discard the pipeline unless it is still healthy after a plain cancellation.
+
+        ``GPUExecution.check()`` re-raises the resource monitor's latched error (MemoryError, AC
+        disconnect) on every later call and ``lyra.measure`` never clears it, so a pipeline that
+        failed once would fail every subsequent job. Any non-cancellation error therefore unloads
+        the pipeline so the next ``ensure()`` rebuilds it; a cancellation keeps it only when the
+        guard still passes.
+        """
+        _clear_gpu()
+        if isinstance(error, InterruptedError):
+            try:
+                pipe.check_execution()
+                return
+            except Exception:
+                pass
+        self.unload()
+
+    @contextmanager
+    def _busy(self, pipe):
+        with self._lock:
+            self._state = "busy"
+        try:
+            yield
+        except BaseException as error:
+            self._after_failure(pipe, error)
+            raise
+        finally:
+            with self._lock:
+                self._state = "ready" if self._pipe is not None else "cold"
+
+    # -- jobs ---------------------------------------------------------------------------------
+
     def create_song(self, request: dict, out_dir: Path, *, options: EngineOptions,
                     on_event: EventCallback | None = None, cancelled: Cancelled | None = None) -> dict:
         """Run plan -> semantic -> synthesize -> decode exactly like ``YuE2Pipeline.__call__``.
@@ -310,78 +353,72 @@ class Engine:
         ``out_dir/song/`` (audio.flac, result.json, latent.npy, noise.npy, ...) via
         ``SongResult.save_artifacts``, which requires an empty directory. ``out_dir/summary.json``
         holds the returned summary. ``InterruptedError`` (cancellation) propagates after the GPU
-        cache is cleared.
+        cache is cleared; any other error also unloads the pipeline (see ``_after_failure``).
         """
         out_dir = Path(out_dir)
         fields, generation, abc_sampling, semantic_sampling = self._split_request(request)
-        generation["ode_steps"] = options.ode_steps
-        generation_config = GenerationConfig.from_dict(generation)
         SongRequest(**fields)  # validate before touching the GPU
-        song_dir, plan_dir = out_dir / "song", out_dir / "plan"
-        if song_dir.exists() and any(song_dir.iterdir()):
-            raise FileExistsError(f"Song directory is not empty: {song_dir}")
+        if (out_dir / "song").exists() and any((out_dir / "song").iterdir()):
+            raise FileExistsError(f"Song directory is not empty: {out_dir / 'song'}")
         pipe = self.ensure(options, on_event)
-        pipe.generation_config = generation_config
-        pipe.stage_timings = {}
+        with self._busy(pipe):
+            return self._run_create(pipe, fields, generation, abc_sampling, semantic_sampling, out_dir,
+                                    options=options, cancelled=cancelled)
+
+    def _run_create(self, pipe, fields: dict, generation: dict, abc_sampling, semantic_sampling,
+                    out_dir: Path, *, options: EngineOptions, cancelled: Cancelled | None) -> dict:
+        """Stage body shared by ``create_song`` and ``cover_song``; caller holds ``_busy``."""
+        song_dir, plan_dir = out_dir / "song", out_dir / "plan"
+        pipe.generation_config = GenerationConfig.from_dict({**generation, "ode_steps": options.ode_steps})
         observer = pipe.token_observer()
-        with self._lock:
-            self._state = "busy"
-        try:
-            pipe.check_execution()
-            native = pipe.build_request(**fields)
-            effective = pipe.effective_config(native, abc_sampling, semantic_sampling)
-            request_id = identity({"request": native.to_dict(), "config": effective, "weights": pipe.weights})
-            start = time.perf_counter()
-            plan = pipe.plan(request=native, abc_sampling=abc_sampling, cancelled=cancelled,
-                             on_token=observer)
-            plan.save(plan_dir)
-            if plan.abc is not None:
-                pipe.emit(ProgressEvent(type="abc", phase="abc", text=plan.abc, status="final",
-                                        tokens=len(plan.abc_ids), ts=time.time()))
-            semantic = pipe.generate_semantic(plan, sampling=semantic_sampling, cancelled=cancelled,
-                                              on_token=observer)
-            noise = initial_noise(len(semantic.tokens), native.seed)
-            nar_start = time.perf_counter()
-            latents = pipe.synthesize(semantic, cancelled=cancelled, noise=noise)
-            nar_seconds = time.perf_counter() - nar_start
-            if pipe.guarded_cancelled(cancelled)():
-                raise InterruptedError("Cancelled before VAE")
-            vae_start = time.perf_counter()
-            audio = pipe.decode(latents, cancelled=cancelled)
-            timing = {
-                "abc": plan.timing, "semantic": semantic.timing, "nar_seconds": nar_seconds,
-                "vae_seconds": time.perf_counter() - vae_start, "load": dict(pipe.load_timing),
-                "e2e_seconds": time.perf_counter() - start, "stages": dict(pipe.stage_timings),
-            }
-            result = SongResult(audio, SAMPLE_RATE, semantic, latents, effective, pipe.weights, timing,
-                                request_id, noise)
-            pipe.check_execution()
-            receipt = result.save_artifacts(song_dir)
-            summary = {
-                "status": receipt["status"],
-                "audio_path": str(song_dir / "audio.flac"),
-                "score_path": str(song_dir / "score.abc") if plan.abc is not None else None,
-                "song_dir": str(song_dir),
-                "plan_dir": str(plan_dir),
-                "sample_rate": SAMPLE_RATE,
-                "seconds": len(audio) / SAMPLE_RATE,
-                "timing": timing,
-                "truncated": result.truncated,
-                "identity": request_id,
-                "preset": options.preset,
-                "precision": options.precision,
-                "ode_steps": options.ode_steps,
-                "seed": native.seed,
-            }
-            write_json(out_dir / "summary.json", summary)
-            pipe.log(f"Completed {summary['seconds']:.1f}s of audio in {timing['e2e_seconds']:.1f}s")
-            return summary
-        except InterruptedError:
-            _clear_gpu()
-            raise
-        finally:
-            with self._lock:
-                self._state = "ready" if self._pipe is not None else "cold"
+        pipe.check_execution()
+        native = pipe.build_request(**fields)
+        effective = pipe.effective_config(native, abc_sampling, semantic_sampling)
+        request_id = identity({"request": native.to_dict(), "config": effective, "weights": pipe.weights})
+        start = time.perf_counter()
+        plan = pipe.plan(request=native, abc_sampling=abc_sampling, cancelled=cancelled, on_token=observer)
+        plan.save(plan_dir)
+        if plan.abc is not None:
+            pipe.emit(ProgressEvent(type="abc", phase="abc", text=plan.abc, status="final",
+                                    tokens=len(plan.abc_ids), ts=time.time()))
+        semantic = pipe.generate_semantic(plan, sampling=semantic_sampling, cancelled=cancelled,
+                                          on_token=observer)
+        noise = initial_noise(len(semantic.tokens), native.seed)
+        nar_start = time.perf_counter()
+        latents = pipe.synthesize(semantic, cancelled=cancelled, noise=noise)
+        nar_seconds = time.perf_counter() - nar_start
+        if pipe.guarded_cancelled(cancelled)():
+            raise InterruptedError("Cancelled before VAE")
+        vae_start = time.perf_counter()
+        audio = pipe.decode(latents, cancelled=cancelled)
+        timing = {
+            "abc": plan.timing, "semantic": semantic.timing, "nar_seconds": nar_seconds,
+            "vae_seconds": time.perf_counter() - vae_start, "load": dict(pipe.load_timing),
+            "e2e_seconds": time.perf_counter() - start, "stages": dict(pipe.stage_timings),
+        }
+        result = SongResult(audio, SAMPLE_RATE, semantic, latents, effective, pipe.weights, timing,
+                            request_id, noise)
+        pipe.check_execution()
+        receipt = result.save_artifacts(song_dir)
+        summary = {
+            "status": receipt["status"],
+            "audio_path": str(song_dir / "audio.flac"),
+            "score_path": str(song_dir / "score.abc") if plan.abc is not None else None,
+            "song_dir": str(song_dir),
+            "plan_dir": str(plan_dir),
+            "sample_rate": SAMPLE_RATE,
+            "seconds": len(audio) / SAMPLE_RATE,
+            "timing": timing,
+            "truncated": result.truncated,
+            "identity": request_id,
+            "preset": options.preset,
+            "precision": options.precision,
+            "ode_steps": options.ode_steps,
+            "seed": native.seed,
+        }
+        write_json(out_dir / "summary.json", summary)
+        pipe.log(f"Completed {summary['seconds']:.1f}s of audio in {timing['e2e_seconds']:.1f}s")
+        return summary
 
     def cover_song(self, audio_path: Path, out_dir: Path, *, task: str = "melody-full", request: dict,
                    options: EngineOptions, on_event: EventCallback | None = None,
@@ -390,7 +427,9 @@ class Engine:
 
         Transcription runs in the worker thread under the resident pipeline's GPU guard
         (``transcribe`` takes no guard of its own; the guard's RLock permits same-thread nesting, and
-        the guard's memory watchdog keeps sampling), so no second ``GPUExecution`` is opened.
+        the guard's memory watchdog keeps sampling), so no second ``GPUExecution`` is opened. The
+        resident AR/NAR/VAE weights are released first so SheetSage2 + MERT (~3 GiB) do not stack on
+        top of them; they reload lazily during the song stages.
         """
         from lyra.transcription.pipeline import transcribe
 
@@ -406,15 +445,15 @@ class Engine:
         fields["cot"] = mode
         SongRequest(**fields)  # validate text, seed and mode before spending time on transcription
         transcription_dir = out_dir / "transcription"
-        if transcription_dir.exists() and any(transcription_dir.iterdir()):
-            raise FileExistsError(f"Transcription directory is not empty: {transcription_dir}")
+        for directory in (transcription_dir, out_dir / "song"):
+            if directory.exists() and any(directory.iterdir()):
+                raise FileExistsError(f"Directory is not empty: {directory}")
         pipe = self.ensure(options, on_event)
         pipe.stage_timings = {}
-        with self._lock:
-            self._state = "busy"
-        started = time.perf_counter()
-        try:
+        with self._busy(pipe):
+            started = time.perf_counter()
             guarded = pipe.guarded_cancelled(cancelled)
+            pipe.release_models()
             with pipe._status("Transcribing audio", unit="windows") as stage:
                 def progress(info: dict) -> None:
                     if info.get("stage") == "encoding":
@@ -430,27 +469,22 @@ class Engine:
                 if stage.total is not None:
                     stage.update(stage.total)
             pipe.check_execution()
-        except InterruptedError:
             _clear_gpu()
-            raise
-        finally:
-            with self._lock:
-                self._state = "ready" if self._pipe is not None else "cold"
-        _clear_gpu()
-        transcription_seconds = time.perf_counter() - started
-        if transcription["status"] != "complete" or transcription["truncated"]:
-            raise ValueError("Transcription is incomplete; inspect its artifacts before using the score")
-        score = (transcription_dir / "score.abc").read_bytes().decode("utf-8")
-        song_request = {**fields, "abc": score}
-        if generation:
-            song_request["generation_config"] = generation
-        if abc_sampling is not None:
-            song_request["abc_sampling"] = abc_sampling
-        if semantic_sampling is not None:
-            song_request["semantic_sampling"] = semantic_sampling
-        write_json(out_dir / "request.json", song_request)
-        summary = self.create_song(song_request, out_dir, options=options, on_event=on_event,
-                                   cancelled=cancelled)
+            transcription_seconds = time.perf_counter() - started
+            if transcription["status"] != "complete" or transcription["truncated"]:
+                raise ValueError("Transcription is incomplete; inspect its artifacts before using the score")
+            score = (transcription_dir / "score.abc").read_bytes().decode("utf-8")
+            song_fields = {**fields, "abc": score}
+            song_request = dict(song_fields)
+            if generation:
+                song_request["generation_config"] = generation
+            if abc_sampling is not None:
+                song_request["abc_sampling"] = abc_sampling
+            if semantic_sampling is not None:
+                song_request["semantic_sampling"] = semantic_sampling
+            write_json(out_dir / "request.json", song_request)
+            summary = self._run_create(pipe, song_fields, generation, abc_sampling, semantic_sampling,
+                                       out_dir, options=options, cancelled=cancelled)
         summary["transcription"] = {
             "dir": str(transcription_dir), "task": task, "seconds": transcription_seconds,
             "source_audio_sha256": transcription["source_audio_sha256"],

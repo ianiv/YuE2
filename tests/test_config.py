@@ -1,6 +1,8 @@
 """Tests for yue2_studio.config; must not import mlx or lyra."""
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,8 +13,15 @@ from yue2_studio import config
 
 def test_importing_config_sets_tf32_off_and_avoids_mlx():
     assert os.environ["MLX_ENABLE_TF32"] == "0"
-    assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
-    assert "lyra" not in sys.modules
+    # Other test modules may import mlx in this process; check a fresh interpreter instead.
+    code = (
+        "import json, os, sys; os.environ.pop('MLX_ENABLE_TF32', None); from yue2_studio import config; "
+        "print(json.dumps({'tf32': os.environ.get('MLX_ENABLE_TF32'), "
+        "'mlx': any(n == 'mlx' or n.startswith('mlx.') for n in sys.modules), "
+        "'lyra': 'lyra' in sys.modules}))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True).stdout
+    assert json.loads(out) == {"tf32": "0", "mlx": False, "lyra": False}
 
 
 def test_home_is_main_checkout_not_worktree():
