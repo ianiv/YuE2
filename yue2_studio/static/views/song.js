@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, presetPicker, randomSeed, renderScore, scorePlayer, STAGE_NAMES, store, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, jobTitle, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, STAGE_NAMES, toast, toastError } from "../ui.js";
 
 export async function songView({ el, param, app }) {
   let job;
@@ -24,7 +24,7 @@ export async function songView({ el, param, app }) {
   const presets = presetPicker({ preset: job.preset, precision: job.precision, ode_steps: job.ode_steps }, app.status && app.status.presets);
   const regenBtn = h("button", { class: "primary", onclick: regenerate }, "Regenerate from this score");
   const countIn = h("input", { id: "s-count", type: "number", min: 2, max: 16, value: 3, style: "width:70px" });
-  const varBtn = h("button", { onclick: variations }, "More variations");
+  const varBtn = h("button", { onclick: variations, disabled: job.kind === "cover" && !transcription, title: job.kind === "cover" ? "Variations of a cover reuse its transcription" : "" }, "More variations");
 
   async function regenerate() {
     const text = abcArea.value.trim();
@@ -32,19 +32,21 @@ export async function songView({ el, param, app }) {
     if (p.cot === "off") toast("Parent used mode “off”; the server will regenerate with mode melody", "info");
     regenBtn.disabled = true;
     try {
-      const style = styleIn.value.trim(), seed = Number(seedIn.value);
-      const r = await api.submit({ kind: "regenerate", ...presets.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== job.seed ? seed : null, title: null } });
+      const style = styleIn.value.trim(), seedRaw = seedIn.value.trim(), seed = seedRaw === "" ? null : Number(seedRaw);
+      await api.submit({ kind: "regenerate", ...presets.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
       toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = "#/queue";
-      void r;
     } catch (e) { toastError(e); regenBtn.disabled = false; }
   }
   async function variations() {
     const count = Math.max(2, Math.min(16, Number(countIn.value) || 3));
     varBtn.disabled = true;
     try {
-      const base = { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
+      // Covers: seed the variations from the transcription so the melody is kept (cot melody, as the cover flow does).
+      const base = job.kind === "cover"
+        ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: null, abc: transcription, title: p.title || null }
+        : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
       const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, params: { count, base, random_seeds: false, label: null } });
-      const groups = store.get("groups", {}); groups[r.group.id] = r.group.label; store.set("groups", groups);
+      rememberGroup(r.group, r.jobs);
       toast(`Queued ${count} variations`, "ok"); location.hash = "#/queue";
     } catch (e) { toastError(e); varBtn.disabled = false; }
   }

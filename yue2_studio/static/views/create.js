@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, h, presetPicker, randomSeed, store, toast, toastError } from "../ui.js";
+import { fill, h, presetPicker, randomSeed, rememberGroup, store, toast, toastError } from "../ui.js";
 
 const GENRES = ["pop, female vocal, upbeat", "lo-fi hip hop", "orchestral cinematic", "indie rock, male vocal", "jazz trio", "edm, synth", "warm piano ballad", "city pop, groovy bass"];
 const SECTIONS = ["[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Bridge]", "[Interlude]", "[Outro]"];
@@ -32,7 +32,12 @@ export async function createView({ el, query, app }) {
     h("button", { type: "button", dataset: { m }, "aria-pressed": String(m === cot), onclick: () => { cot = m; cotSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === cot))); abcDetails.hidden = cot === "off"; } }, m)));
   const presets = presetPicker({ preset: saved.preset, precision: saved.precision, ode_steps: saved.ode_steps }, app.status && app.status.presets);
   const abcDetails = h("details", { hidden: cot === "off", open: !!saved.abc }, h("summary", {}, "Supply an ABC score (optional)"),
-    h("p", { class: "hint" }, "Paste an ABC score to skip planning; the engine follows it. Not allowed with mode “off”."), f.abc);
+    h("p", { class: "hint" }, "Paste an ABC score (or load a .abc/.txt file) to skip planning; the engine follows it. Not allowed with mode “off”."),
+    h("label", { class: "row small" }, "Load file", h("input", { id: "f-abc-file", type: "file", accept: ".abc,.txt,text/plain", style: "width:auto", onchange: async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      try { f.abc.value = await file.text(); collect(); toast(`Loaded ${file.name}`, "ok"); } catch (err) { toast(`Could not read ${file.name}: ${err.message}`, "err"); }
+      e.target.value = "";
+    } })), f.abc);
   const submit = h("button", { type: "submit", class: "primary", id: "f-submit" }, "Create song");
   const variationsHint = h("span", { class: "hint" });
   const updateCount = () => { const n = Number(f.count.value) || 1; submit.textContent = n > 1 ? `Create ${n} variations` : "Create song"; variationsHint.textContent = n > 1 ? "Submitted as one group; seeds " + (f.random.checked ? "random" : "seed, seed+1, …") : ""; };
@@ -81,7 +86,7 @@ export async function createView({ el, query, app }) {
     try {
       if (v.count > 1) {
         const r = await api.submit({ kind: "variations", params: { count: v.count, base, random_seeds: v.random_seeds, label: null }, ...common });
-        const groups = store.get("groups", {}); groups[r.group.id] = r.group.label; store.set("groups", groups);
+        rememberGroup(r.group, r.jobs);
         toast(`Queued ${r.jobs.length} variations`, "ok");
       } else {
         const r = await api.submit({ kind: "create", params: base, ...common });

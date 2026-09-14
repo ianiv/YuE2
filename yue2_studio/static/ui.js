@@ -33,6 +33,12 @@ export function toast(message, kind = "info", { link, timeout = 6000 } = {}) {
 }
 export const toastError = (e) => toast(e && e.message ? `${e.message}${e.code ? ` (${e.code})` : ""}` : String(e), "err", { timeout: 9000 });
 
+export function applyTheme(theme, { persist = true } = {}) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.dataset.theme = theme; else delete root.dataset.theme;
+  if (persist) store.set("theme", theme || "system");
+}
+
 export const store = {
   get(k, fallback) { try { const v = localStorage.getItem("yue2." + k); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
   set(k, v) { try { localStorage.setItem("yue2." + k, JSON.stringify(v)); } catch { /* ignore */ } },
@@ -58,7 +64,8 @@ export function estimate(ev, elapsed, kind) {
   const weights = stages.map((s) => STAGE_WEIGHT[s]); const sum = weights.reduce((a, b) => a + b, 0);
   if (!ev || !ev.stage) return { fraction: 0, eta: null };
   const idx = stages.indexOf(ev.stage);
-  let done = stages.slice(0, Math.max(idx, 0)).reduce((a, s) => a + STAGE_WEIGHT[s], 0);
+  if (idx < 0) return { fraction: 0, eta: null };
+  const done = stages.slice(0, Math.max(idx, 0)).reduce((a, s) => a + STAGE_WEIGHT[s], 0);
   const inStage = ev.total ? Math.min(1, (ev.completed || 0) / ev.total) : (ev.status === "complete" ? 1 : 0.3);
   const fraction = Math.min(0.99, (done + STAGE_WEIGHT[ev.stage] * inStage) / sum);
   let eta = null;
@@ -74,7 +81,7 @@ export function estimate(ev, elapsed, kind) {
 export const jobTitle = (job) => job.title || (job.params && (job.params.title || fmt.excerpt(job.params.style, 48))) || job.id.slice(0, 8);
 
 /** abcjs score rendering, throttled to ≤2 Hz per element. */
-export function renderScore(el, abc, opts = {}) {
+export function renderScore(el, abc, opts = {}, { immediate = false } = {}) {
   if (!el._score) el._score = { pending: null, last: 0, timer: null };
   const s = el._score;
   const draw = () => {
@@ -84,7 +91,7 @@ export function renderScore(el, abc, opts = {}) {
     catch (e) { el.textContent = "Could not render score: " + e.message; }
   };
   clearTimeout(s.timer);
-  const wait = 500 - (Date.now() - s.last);
+  const wait = immediate ? 0 : 500 - (Date.now() - s.last);
   if (wait <= 0) draw(); else s.timer = setTimeout(draw, wait);
 }
 
@@ -134,6 +141,14 @@ export function presetPicker(initial = {}, presets = null) {
   el.set = (v) => { Object.assign(state, v); prec.value = state.precision; steps.value = state.ode_steps; sync(); };
   return el;
 }
+
+/** Remember a variations group from the POST response: label + jobs in submit order. */
+export function rememberGroup(group, jobs) {
+  const groups = store.get("groups", {});
+  groups[group.id] = { label: group.label, ids: (jobs || []).map((j) => j.id) };
+  store.set("groups", groups);
+}
+export const groupLabel = (gid) => { const g = store.get("groups", {})[gid]; return g ? (typeof g === "string" ? g : g.label) : null; };
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 export const confirmDialog = (msg) => window.confirm(msg);

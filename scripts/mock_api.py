@@ -48,6 +48,7 @@ SUBS: dict[str, list[asyncio.Queue]] = {}
 SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system"}
 ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None}
 DELAY = 0.2
+SEQ = 0
 COVER_OK = True
 
 
@@ -122,10 +123,13 @@ async def publish(job: dict, ev: dict | None, done: bool = False) -> None:
 
 def new_job(kind: str, params: dict, preset: str, precision: str | None, ode_steps: int | None) -> dict:
     p = {"quality": ("bf16", 32), "fast": ("8bit", 8)}.get(preset, (precision, ode_steps))
+    global SEQ
+    SEQ += 1
     seed = params.get("seed") if params.get("seed") is not None else random.randint(0, 2**31 - 1)
     params = {**params, "seed": seed}
     return {
         "id": uuid.uuid4().hex,
+        "seq": SEQ,
         "kind": kind,
         "status": "queued",
         "group_id": None,

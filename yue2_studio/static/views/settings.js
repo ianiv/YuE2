@@ -1,6 +1,5 @@
 import { api } from "../api.js";
-import { applyTheme } from "../app.js";
-import { fill, fmt, h, store, toast, toastError } from "../ui.js";
+import { applyTheme, fill, fmt, h, store, toast, toastError } from "../ui.js";
 
 export async function settingsView({ el, app }) {
   let s;

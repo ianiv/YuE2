@@ -38,7 +38,11 @@ export const api = {
   upload: (file) => { const fd = new FormData(); fd.append("file", file, file.name); return request("POST", "/api/upload", fd); },
   text: async (path) => {
     const res = await fetch(path);
-    if (!res.ok) throw new ApiError(res.status, "not_found", `${path}: ${res.status}`);
+    if (!res.ok) {
+      let code = { 404: "not_found", 503: "engine_unavailable", 409: "conflict", 400: "validation_error" }[res.status] || "internal_error", message = `${path}: ${res.status}`;
+      try { const body = await res.json(); if (body && body.error) ({ code, message } = body.error); } catch { /* not JSON */ }
+      throw new ApiError(res.status, code, message);
+    }
     return res.text();
   },
 };

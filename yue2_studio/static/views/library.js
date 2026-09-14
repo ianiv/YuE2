@@ -1,13 +1,17 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, store, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, store, toast, toastError } from "../ui.js";
 
-/** Index of each job inside its group, by created_at ascending (API has no group endpoint). */
+/** Index of each job inside its group (API has no group endpoint). Order: the submit response's
+ * job order if we remembered it, else Job.seq (submit order), then seed, then created_at. */
 export function groupIndex(jobs) {
-  const byGroup = {};
+  const byGroup = {}, known = store.get("groups", {});
   for (const j of jobs) if (j.group_id) (byGroup[j.group_id] ||= []).push(j);
   const idx = {};
+  const num = (v) => (typeof v === "number" ? v : Number.POSITIVE_INFINITY);
   for (const [gid, members] of Object.entries(byGroup)) {
-    members.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const ids = known[gid] && Array.isArray(known[gid].ids) ? known[gid].ids : [];
+    const pos = (j) => { const i = ids.indexOf(j.id); return i < 0 ? Number.POSITIVE_INFINITY : i; };
+    members.sort((a, b) => (pos(a) - pos(b)) || (num(a.seq) - num(b.seq)) || (a.seed - b.seed) || a.created_at.localeCompare(b.created_at));
     members.forEach((j, i) => { idx[j.id] = { n: i + 1, total: members.length, gid }; });
   }
   return idx;
@@ -25,30 +29,37 @@ export async function libraryView({ el, query }) {
   const count = h("span", { class: "sub" });
   const failedList = h("div", { class: "stack" });
   const failed = h("details", {}, h("summary", {}, "Failed and cancelled"), failedList);
+  const PAGE = 60;
+  const more = h("button", { hidden: true, onclick: () => load(true) }, "Load more");
   fill(el,
     h("div", { class: "view-head" }, h("h1", {}, "Library"), count),
     h("div", { class: "row", style: "margin-bottom:14px" }, h("div", { style: "flex:1 1 200px" }, f.q), f.kind, f.preset, f.group),
-    grid, h("div", { style: "height:20px" }), failed);
+    grid, h("div", { class: "row", style: "justify-content:center;margin-top:14px" }, more), h("div", { style: "height:20px" }), failed);
 
-  let jobs = [], gidx = {};
-  async function load() {
+  let jobs = [], gidx = {}, total = 0;
+  async function load(append = false) {
+    more.disabled = true;
     try {
-      const [done, bad] = await Promise.all([api.jobs({ status: "done", limit: 500 }), api.jobs({ status: "failed,cancelled", limit: 100 })]);
-      jobs = done.jobs; gidx = groupIndex(jobs);
-      const labels = store.get("groups", {});
+      const offset = append ? jobs.length : 0;
+      const [done, bad] = await Promise.all([api.jobs({ status: "done", limit: PAGE, offset }), append ? null : api.jobs({ status: "failed,cancelled", limit: 100 })]);
+      jobs = append ? jobs.concat(done.jobs) : done.jobs; total = done.total; gidx = groupIndex(jobs);
+      more.hidden = jobs.length >= total; more.disabled = false;
+      more.textContent = `Load more (${jobs.length} of ${total})`;
       const groups = [...new Set(jobs.map((j) => j.group_id).filter(Boolean))];
-      fill(f.group, h("option", { value: "" }, "All groups"), groups.map((g) => h("option", { value: g, selected: g === filters.group }, labels[g] ? fmt.excerpt(labels[g], 30) : `group ${g.slice(0, 6)}`)));
+      fill(f.group, h("option", { value: "" }, "All groups"), groups.map((g) => h("option", { value: g, selected: g === filters.group }, groupLabel(g) ? fmt.excerpt(groupLabel(g), 30) : `group ${g.slice(0, 6)}`)));
       f.group.hidden = groups.length === 0;
       paint();
-      fill(failedList, bad.jobs.length ? bad.jobs.map(badRow) : h("p", { class: "muted small" }, "None."));
-      failed.querySelector("summary").textContent = `Failed and cancelled (${bad.total})`;
+      if (bad) {
+        fill(failedList, bad.jobs.length ? bad.jobs.map(badRow) : h("p", { class: "muted small" }, "None."));
+        failed.querySelector("summary").textContent = `Failed and cancelled (${bad.total})`;
+      }
     } catch (e) { toastError(e); }
   }
 
   function paint() {
     const shown = jobs.filter((j) => (!filters.kind || j.kind === filters.kind) && (!filters.preset || j.preset === filters.preset) && (!filters.group || j.group_id === filters.group)
       && (!filters.q || [jobTitle(j), j.params.style, j.params.lyrics].join("\n").toLowerCase().includes(filters.q)));
-    count.textContent = `${shown.length} of ${jobs.length} songs`;
+    count.textContent = jobs.length < total ? `${shown.length} shown of ${jobs.length} loaded (${total} total)` : `${shown.length} of ${total} songs`;
     fill(grid, shown.length ? shown.map(songCard) : h("div", { class: "empty", style: "grid-column:1/-1" }, jobs.length ? "No songs match these filters." : ["No finished songs yet. ", h("a", { href: "#/create" }, "Create one")]));
   }
 

@@ -1,12 +1,11 @@
 import { api, subscribe } from "../api.js";
-import { estimate, fill, fmt, h, jobTitle, renderScore, STAGE_NAMES, STAGE_ORDER, store, toast, toastError } from "../ui.js";
+import { estimate, fill, fmt, groupLabel, h, jobTitle, renderScore, STAGE_NAMES, STAGE_ORDER, toast, toastError } from "../ui.js";
 
 export async function queueView({ el }) {
   const cards = new Map(); // id -> {job, el, close, last, abc}
   const list = h("div", { class: "stack" });
   const empty = h("div", { class: "empty" }, "Nothing queued. ", h("a", { href: "#/create" }, "Create a song"), " or ", h("a", { href: "#/cover" }, "make a cover"), ".");
   fill(el, h("div", { class: "view-head" }, h("h1", {}, "Queue"), h("span", { class: "sub" }, "Jobs run one at a time on the GPU.")), list, empty);
-  const groups = store.get("groups", {});
 
   function card(job) {
     const c = { job, last: job.progress || null, abc: null, startedAt: job.started_at ? Date.parse(job.started_at) : null };
@@ -19,7 +18,7 @@ export async function queueView({ el }) {
     c.el = h("div", { class: "card", dataset: { id: job.id } },
       h("div", { class: "row between" },
         h("div", { class: "row" }, h("span", { class: "title" }, jobTitle(job)), status, h("span", { class: "tag" }, job.kind),
-          job.group_id ? h("span", { class: "tag accent", title: groups[job.group_id] || "variation group" }, groups[job.group_id] ? fmt.excerpt(groups[job.group_id], 28) : "group") : null),
+          job.group_id ? h("span", { class: "tag accent", title: groupLabel(job.group_id) || "variation group" }, groupLabel(job.group_id) ? fmt.excerpt(groupLabel(job.group_id), 28) : "group") : null),
         cancelBtn),
       h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, job.preset)), h("span", {}, "seed ", h("b", { class: "num" }, job.seed)), h("span", {}, "mode ", h("b", {}, job.params.cot || job.params.task || "—")),
         job.position !== null && job.status === "queued" ? h("span", { class: "pos" }, "position ", h("b", {}, job.position + 1)) : null),
@@ -37,9 +36,13 @@ export async function queueView({ el }) {
   function onEvent(c, ev) {
     if (ev.type === "status" && ev.status === "running" && !c.startedAt) c.startedAt = Date.now();
     if (ev.type === "stage" || ev.type === "token") c.last = ev.type === "stage" ? ev : { ...(c.last || {}), tps: ev.tps ?? (c.last && c.last.tps), completed: ev.tokens ?? (c.last && c.last.completed) };
-    if (ev.type === "status" && ev.message) c.message = ev.message;
-    if (ev.type === "abc" && ev.text) { c.abc = ev.text; c.abcBox.hidden = false; renderScore(c.abcBox, ev.text, { staffwidth: 600 }); }
-    if (ev.type === "status" && ["done", "failed", "cancelled"].includes(ev.status)) c.status.textContent = ev.status;
+    if ((ev.type === "status" || ev.type === "log") && ev.message) c.message = ev.message;
+    if (ev.type === "abc" && ev.text) {
+      c.abc = ev.text; c.abcBox.hidden = false;
+      const final = ev.partial === false;
+      renderScore(c.abcBox, ev.text, { staffwidth: 600 }, { immediate: final });
+      c.abcBox.classList.toggle("final", final); c.abcBox.title = final ? "Final score" : "Score streaming in…";
+    }
     paint(c);
   }
 
@@ -76,6 +79,8 @@ export async function queueView({ el }) {
   }
 
   function finish(c, job) {
+    if (c.finished) return; // cancel response and SSE `done` can both arrive
+    c.finished = true;
     c.close && c.close(); cards.delete(job.id); c.el.remove();
     if (job.status === "done") toast(`Done: ${jobTitle(job)}`, "ok", { link: { href: `#/song/${job.id}`, label: "Open" } });
     else if (job.status === "failed") toast(`Failed: ${jobTitle(job)} — ${job.error || "unknown error"}`, "err", { timeout: 12000 });
