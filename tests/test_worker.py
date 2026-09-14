@@ -8,7 +8,16 @@ import pytest
 from yue2_studio import config, jobs
 from yue2_studio.fake import FakeEngine
 from yue2_studio.jobs import JobStore
-from yue2_studio.worker import EventBus, Worker, derive_timing, derive_truncated, normalise, stage_key
+from yue2_studio.worker import (
+    EVENT_FIELDS,
+    EventBus,
+    Worker,
+    derive_timing,
+    derive_truncated,
+    normalise,
+    stage_key,
+    status_event,
+)
 
 BASE = {"style": "dreamy indie pop", "lyrics": "[verse]\nla la", "seed": 5}
 
@@ -257,15 +266,66 @@ def test_normalise_raw_stage_event():
     assert token["tokens"] == 12 and token["tps"] == 100.5 and token["phase"] == "semantic"
 
 
-@pytest.mark.parametrize(("label", "key"), [
-    ("Verifying model files", "load"), ("Loading 8bit AR model", "load"),
-    ("Loading BF16 acoustic conditioning", "load"), ("Loading acoustic model", "load"),
-    ("Loading MLX audio decoder", "load"), ("Using provided score", "plan"),
-    ("Planning score", "plan"), ("Generating song", "semantic"), ("Synthesizing audio", "synthesize"),
-    ("Decoding audio", "decode"), ("Transcribing audio", "transcribe"), ("Saving artifacts", "save"),
+# Every stage label the engine (mlx-Yue) emits, per docs/API.md §6, with its HTTP stage key and unit.
+UPSTREAM_STAGES = [
+    ("Verifying model files", "load", None),
+    ("Loading bf16 AR model", "load", None),
+    ("Loading 8bit AR model", "load", None),
+    ("Loading 4bit AR model", "load", None),
+    ("Loading BF16 acoustic conditioning", "load", None),
+    ("Loading acoustic model", "load", None),
+    ("Loading MLX audio decoder", "load", None),
+    ("Using provided score", "plan", None),
+    ("Planning score", "plan", "tokens"),
+    ("Generating song", "semantic", "tokens"),
+    ("Synthesizing audio", "synthesize", "steps"),
+    ("Decoding audio", "decode", "chunks"),
+    ("Transcribing audio", "transcribe", "windows"),
+    ("Saving artifacts", "save", None),  # emitted by the worker itself
+]
+
+
+@pytest.mark.parametrize(("label", "key", "unit"), UPSTREAM_STAGES)
+@pytest.mark.parametrize(("raw_status", "http_status"), [
+    ("running", "running"), ("completed", "complete"), ("failed", "failed"), ("cancelled", "cancelled"),
+    ("truncated", "truncated"),
 ])
-def test_stage_keys(label, key):
+def test_normalise_every_upstream_stage_label(label, key, unit, raw_status, http_status):
+    raw = {"type": "stage", "stage": label, "completed": 3, "total": 8 if unit else None, "unit": unit,
+           "status": raw_status, "seconds": 1.25, "ts": 1_757_800_000.5}
+    if unit == "tokens":
+        raw["tps"] = 99.5
+    event = normalise(raw, "job1")
     assert stage_key(label) == key
+    assert event["stage"] == key and event["label"] == label and event["unit"] == unit
+    assert event["status"] == http_status and event["type"] == "stage" and event["job_id"] == "job1"
+    assert event["completed"] == 3 and event["total"] == (8 if unit else None) and event["seconds"] == 1.25
+    assert event["tps"] == (99.5 if unit == "tokens" else None)
+    assert event["ts"] == "2025-09-13T21:46:40.500Z"
+    assert set(event) == set(EVENT_FIELDS)
+    assert all(event[k] is None for k in ("phase", "tokens", "text", "partial", "message"))
+
+
+def test_stage_key_fallbacks():
+    assert stage_key("Loading something new") == "load"
+    assert stage_key("  planning score ") == "plan"
+    assert stage_key("Transcription windows") == "transcribe"
+    assert stage_key("Mystery step") == "mystery"
+    assert stage_key(None) is None and stage_key("") is None
+
+
+def test_normalise_edge_cases():
+    unknown = normalise({"type": "weird", "x": 1, "ts": 2.0}, "j")
+    assert unknown["type"] == "log" and json.loads(unknown["message"]) == {"type": "weird", "x": 1, "ts": 2.0}
+    no_ts = normalise({"type": "log", "text": "hi"}, "j")
+    assert no_ts["ts"].endswith("Z") and len(no_ts["ts"]) == 24
+    iso_ts = normalise({"type": "log", "text": "hi", "ts": "2026-01-01T00:00:00.000Z"}, "j")
+    assert iso_ts["ts"] == "2026-01-01T00:00:00.000Z"
+    status = status_event("j", "running", "loading models (bf16)…", stage="load")
+    assert (status["type"], status["stage"], status["status"], status["message"]) == \
+        ("status", "load", "running", "loading models (bf16)…")
+    assert normalise({"type": "abc", "text": "X:1", "tokens": 1}, "j")["partial"] is None  # no status
+    assert normalise({"type": "log", "message": "m"}, "j")["message"] == "m"
 
 
 def test_derive_timing_and_truncated():
@@ -281,3 +341,105 @@ def test_derive_timing_and_truncated():
     assert derive_truncated({"truncated": {"abc": False, "semantic": False}}) is None
     supplied = {"timing": {"abc": {"seconds": 0.0, "output_tokens": 0, "external_prefix_tokens": 300}}}
     assert derive_timing(supplied)["abc_tps"] is None and derive_timing(supplied)["plan"] == 0.0
+
+
+def test_derive_timing_from_fake_engine_summaries(tmp_path):
+    engine = FakeEngine(delay=0)
+    options = config.resolve_preset("fast")
+    plain = engine.create_song({"style": "s", "lyrics": "l", "cot": "full", "seed": 1}, tmp_path / "a",
+                               options=options)
+    timing = derive_timing(plain)
+    assert timing["transcribe"] is None and timing["audio_seconds"] == 1.0
+    assert timing["abc_tps"] is None or timing["abc_tps"] > 0  # None when the fake planned in ~0 s
+    assert timing["plan"] >= 0 and timing["e2e"] >= timing["synthesize"]
+    src = tmp_path / "src.mp3"
+    src.write_bytes(b"x")
+    cover = engine.cover_song(src, tmp_path / "b", task="melody-full", options=options,
+                              request={"style": "s", "lyrics": "l", "cot": "melody", "seed": 1})
+    assert "transcription_seconds" in cover["timing"] and cover["transcription"]["task"] == "melody-full"
+    timing = derive_timing(cover)
+    assert timing["transcribe"] is not None and timing["transcribe"] >= 0
+    assert timing["abc_tps"] is None and timing["plan"] == 0.0  # transcribed score is a supplied score
+    assert derive_truncated(cover) is None
+    assert derive_timing({}) == dict.fromkeys(("plan", "semantic", "synthesize", "decode", "transcribe",
+                                              "e2e", "abc_tps", "semantic_tps", "audio_seconds"))
+    assert derive_truncated({"truncated": {"abc": True, "semantic": True}})["phase"] == "abc"
+
+
+async def test_precision_switch_announces_load_and_rebuilds(harness):
+    fast = harness.submit({"kind": "create", "preset": "fast", "params": BASE})
+    events, _ = await harness.collect(fast.id)
+    assert sum(1 for e in events if e["type"] == "status" and e["stage"] == "load") == 1
+    assert harness.engine.precision == "8bit" and harness.engine.ensure_calls >= 1
+    calls = harness.engine.ensure_calls
+    again = harness.submit({"kind": "create", "preset": "fast", "params": BASE})
+    events, _ = await harness.collect(again.id)
+    assert not any(e["type"] == "status" and e["stage"] == "load" for e in events)  # warm, same precision
+    assert harness.engine.ensure_calls > calls
+    quality = harness.submit({"kind": "create", "preset": "quality", "params": BASE})
+    events, done = await harness.collect(quality.id)
+    load = [e for e in events if e["type"] == "status" and e["stage"] == "load"]
+    assert len(load) == 1 and "bf16" in load[0]["message"]
+    assert done["precision"] == "bf16" and harness.engine.precision == "bf16"
+    assert harness.worker.engine_status()["precision"] == "bf16"
+    custom = harness.submit({"kind": "create", "preset": "custom", "precision": "bf16", "ode_steps": 12,
+                             "params": BASE})
+    events, done = await harness.collect(custom.id)
+    assert not any(e["type"] == "status" and e["stage"] == "load" for e in events)  # ode_steps is per job
+    synth = [e for e in events if e["type"] == "stage" and e["stage"] == "synthesize"]
+    assert synth[-1]["total"] == 12 and done["ode_steps"] == 12
+
+
+async def test_start_marks_stale_running_rows_failed(tmp_path):
+    h = Harness(tmp_path, FakeEngine(delay=0))
+    stale = h.submit({"kind": "create", "params": BASE})  # worker not started: row stays queued
+    fresh = h.submit({"kind": "create", "params": BASE})
+    h.store.update_status(stale.id, "running")  # as if the server died mid-job
+    q = h.bus.subscribe(fresh.id)
+    h.worker.start(asyncio.get_running_loop())
+    try:
+        row = h.store.get(stale.id)
+        assert row.status == "failed" and "server restarted" in row.error and row.finished_at
+        while True:
+            kind, payload = await asyncio.wait_for(q.get(), 10)
+            if kind == "done":
+                break
+        assert payload["status"] == "done"
+        assert all(req["id"] != stale.id for _, req in h.engine.calls)
+    finally:
+        h.bus.unsubscribe(fresh.id, q)
+        await asyncio.to_thread(h.worker.stop)
+        h.store.close()
+
+
+async def test_event_bus_fanout_and_cache():
+    bus = EventBus(asyncio.get_running_loop())
+    a, b = bus.subscribe("j"), bus.subscribe("j")
+    other = bus.subscribe("k")
+    bus.publish("j", {"n": 1})
+    assert bus.last("j") == {"n": 1} and bus.last("k") is None
+    assert await asyncio.wait_for(a.get(), 1) == ("progress", {"n": 1})
+    assert await asyncio.wait_for(b.get(), 1) == ("progress", {"n": 1})
+    bus.unsubscribe("j", b)
+    bus.publish("j", {"n": 2})
+    assert bus.last("j") == {"n": 2}
+    bus.done("j", {"id": "j"})
+    assert await asyncio.wait_for(a.get(), 1) == ("progress", {"n": 2})
+    assert await asyncio.wait_for(a.get(), 1) == ("done", {"id": "j"})
+    assert bus.last("j") is None and b.empty() and other.empty()
+    bus.publish("j", {"n": 3})  # no subscribers left: cached only
+    assert bus.last("j") == {"n": 3} and a.empty()
+    bus.forget("j")
+    assert bus.last("j") is None
+    bus.bind(None)
+    bus.publish("k", {"n": 4})  # unbound bus drops fan-out but still caches
+    assert other.empty() and bus.last("k") == {"n": 4}
+
+
+def test_worker_cancel_unknown_job_raises(tmp_path):
+    h = Harness(tmp_path, FakeEngine(delay=0))
+    with pytest.raises(jobs.NotFound):
+        h.worker.cancel("nope")
+    assert h.worker.engine_status() == {"state": "cold", "precision": None, "memory_gib": None,
+                                        "current_job_id": None}
+    h.store.close()

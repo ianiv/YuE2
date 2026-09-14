@@ -195,3 +195,80 @@ def test_settings_defaults_and_partial_update(store):
         store.update_settings({"theme": "neon"})
     job = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
     assert job.options(store.get_settings()).memory_budget_gib == 20.0
+
+
+def test_iso_timestamps_are_utc_millisecond_z():
+    assert jobs.iso(1_757_800_000.123) == "2025-09-13T21:46:40.123Z"
+    assert jobs.iso(0) == "1970-01-01T00:00:00.000Z"
+    now = jobs.now_iso()
+    assert len(now) == 24 and now.endswith("Z") and now[10] == "T"
+
+
+def test_artifacts_for_reflects_song_dir(tmp_path):
+    empty = {"audio": False, "score": False, "plan": False, "transcription": False}
+    assert jobs.artifacts_for(tmp_path) == empty
+    (tmp_path / "plan").mkdir()
+    (tmp_path / "plan" / "score.abc").write_text("X:1")
+    (tmp_path / "plan" / "plan.json").write_text("{}")
+    assert jobs.artifacts_for(tmp_path) == {**empty, "score": True, "plan": True}
+    (tmp_path / "song").mkdir()
+    (tmp_path / "song" / "audio.flac").write_bytes(b"fLaC")
+    (tmp_path / "transcription").mkdir()
+    (tmp_path / "transcription" / "score.abc").write_text("X:1")
+    assert jobs.artifacts_for(tmp_path) == {"audio": True, "score": True, "plan": True, "transcription": True}
+
+
+def test_engine_request_strips_display_fields(store):
+    params = {**BASE, "title": "T", "cfg_scale": 1.25, "cot": "melody", "abc": "X:1\nK:C\nC|", "seed": 3}
+    job = jobs.submit(store, {"kind": "create", "params": params}).jobs[0]
+    assert jobs.engine_request(job) == {"style": BASE["style"], "lyrics": BASE["lyrics"], "cot": "melody",
+                                        "seed": 3, "id": job.id, "abc": "X:1\nK:C\nC|", "cfg_scale": 1.25}
+    plain = jobs.submit(store, {"kind": "create", "params": {**BASE, "seed": 4}}).jobs[0]
+    assert set(jobs.engine_request(plain)) == {"style", "lyrics", "cot", "seed", "id"}
+
+
+def test_title_and_blank_overrides(store):
+    job = jobs.submit(store, {"kind": "create", "params": {**BASE, "title": "   "}}).jobs[0]
+    assert job.title is None and job.to_api()["title"] is None
+    parent = jobs.submit(store, {"kind": "create", "params": {**BASE, "title": "Orig"}}).jobs[0]
+    regen = jobs.submit(store, {"kind": "regenerate",
+                                "params": {"parent_id": parent.id, "abc": "X:1", "style": "  ", "lyrics": ""}}
+                        ).jobs[0]
+    assert regen.params["style"] == BASE["style"] and regen.params["lyrics"] == BASE["lyrics"]
+    assert regen.title == "Orig" and regen.params["cot"] == "full"
+
+
+def test_variations_seed_arithmetic_wraps_and_stays_valid(store):
+    sub = jobs.submit(store, {"kind": "variations",
+                              "params": {"count": 2, "base": {**BASE, "seed": 2**63 - 1}}})
+    assert [j.seed for j in sub.jobs] == [2**63 - 1, 0]
+    for job in sub.jobs:
+        assert 0 <= jobs.engine_request(job)["seed"] < 2**63
+
+
+def test_counts_and_running_id(store):
+    a = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
+    b = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
+    assert store.counts() == {"queued": 2} and store.running_id() is None
+    store.update_status(a.id, "running")
+    assert store.counts() == {"queued": 1, "running": 1} and store.running_id() == a.id
+    assert store.get(a.id).started_at is not None and store.get(b.id).position == 0
+    store.update_status(a.id, "done")
+    assert store.running_id() is None and store.get(a.id).finished_at is not None
+
+
+def test_store_reopen_keeps_rows_and_seq(tmp_path):
+    db = tmp_path / "app.db"
+    s1 = JobStore(db)
+    ids = [jobs.submit(s1, {"kind": "create", "params": BASE}).jobs[0].id for _ in range(3)]
+    s1.update_settings({"theme": "dark"})
+    s1.close()
+    s2 = JobStore(db)
+    try:
+        rows, total = s2.list()
+        assert total == 3 and [j.id for j in rows] == list(reversed(ids))
+        assert s2.get_settings()["theme"] == "dark"
+        new = jobs.submit(s2, {"kind": "create", "params": BASE}).jobs[0]
+        assert new.seq == 4  # the counter continues where it left off
+    finally:
+        s2.close()
