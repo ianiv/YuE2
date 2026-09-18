@@ -40,7 +40,9 @@ second, they are memory-mapped) and stay resident until the precision changes or
 ## Using the studio
 
 The UI is a single page with hash routes; every view works at phone width and follows the system
-light/dark theme (overridable in Settings).
+light/dark theme (overridable in Settings). The header reads **Generate ▾** (Create · Cover · Hum) ·
+Projects · Library · Settings, with **Queue** (and its pending-jobs badge) and the engine pill at
+the right.
 
 **Create** (`#/create`) — describe the *style* (free text; genre chips append common tags), write
 *lyrics* using section tags on their own lines (`[Intro]`, `[Verse]`, `[Pre-Chorus]`, `[Chorus]`,

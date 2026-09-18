@@ -2,9 +2,14 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — Global player
+## Unreleased — Global player, header nav
 
 ### Changed
+- **Header nav reorganised.** `Generate ▾ · Projects · Library · Settings`, then `Queue` (with its
+  badge) and the engine pill right-aligned. Generate is a `<details>` dropdown (Create / Cover /
+  Hum) that works without JS, highlights when one of its pages is open, and closes on navigation,
+  click outside or Escape (`installMenuAutoClose()` in `ui.js`, which the project page's "New take"
+  menus now share).
 - **Playback survives navigation and re-renders.** One `<audio>` lives in a player bar fixed to the
   bottom of the page (`yue2_studio/static/player.js`), outside the routed view, so switching tabs,
   typing in the Library search, a result card finishing or the project page's 5 s reload no longer

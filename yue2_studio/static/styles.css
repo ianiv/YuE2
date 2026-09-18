@@ -48,10 +48,15 @@ code, pre, textarea.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .01em; color: var(--text); }
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 18px; height: 18px; border-radius: 3px; background: linear-gradient(135deg, var(--accent), #7a4a06); display: inline-block; }
-nav.main { display: flex; gap: 2px; flex-wrap: wrap; }
-nav.main a { padding: 6px 10px; border-radius: var(--radius); color: var(--muted); font-weight: 500; }
-nav.main a:hover { color: var(--text); text-decoration: none; background: var(--surface-2); }
-nav.main a[aria-current="page"] { color: var(--text); background: var(--surface-2); }
+nav.main { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; flex: 1 1 auto; }
+nav.main > a, nav.main > details.menu > summary { padding: 6px 10px; border-radius: var(--radius); color: var(--muted); font-weight: 500; cursor: pointer; white-space: nowrap; }
+nav.main > a:hover, nav.main > details.menu > summary:hover { color: var(--text); text-decoration: none; background: var(--surface-2); }
+nav.main > a[aria-current="page"], nav.main > details.menu > summary[aria-current="page"], nav.main > details.menu[open] > summary { color: var(--text); background: var(--surface-2); }
+nav.main > .nav-queue { margin-left: auto; }
+#engine-pill { margin-left: auto; }
+nav.main .caret { font-size: 10px; margin-left: 4px; opacity: .7; }
+nav.main .menu-list { left: 0; right: auto; z-index: 20; min-width: 140px; }
+nav.main .menu-list a[aria-current="page"] { color: var(--text); background: var(--surface-2); font-weight: 600; }
 .badge-count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
 .spacer { flex: 1; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--muted); background: var(--bg); white-space: nowrap; }

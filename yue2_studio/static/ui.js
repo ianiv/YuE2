@@ -285,6 +285,23 @@ export function uploadPicker({ onPick, label = "Or reuse a recent upload" } = {}
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 export const confirmDialog = (msg) => window.confirm(msg);
 
+/** Close every open `details.menu` dropdown on a click outside it or on Escape. Install once. */
+export function installMenuAutoClose() {
+  if (installMenuAutoClose.done) return;
+  installMenuAutoClose.done = true;
+  const closeAll = (except = null) => document.querySelectorAll("details.menu[open]").forEach((d) => { if (d !== except) d.open = false; });
+  document.addEventListener("click", (e) => {
+    const t = e.target instanceof Element ? e.target : null;
+    closeAll(t && !t.closest(".menu-list a") ? t.closest("details.menu") : null); // picking an item closes its menu too
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const focused = document.activeElement && document.activeElement.closest ? document.activeElement.closest("details.menu[open]") : null;
+    closeAll();
+    if (focused) focused.querySelector("summary").focus(); // keep focus on the menu instead of dropping to body
+  });
+}
+
 // -- projects --------------------------------------------------------------------------------
 
 /** "Project › Track" link tag for a job that is a take (★ when it is the chosen take); null otherwise. */
