@@ -2,30 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — Global player, header nav
-
-### Changed
-- **Header nav reorganised.** `Generate ▾ · Projects · Library · Settings`, then `Queue` (with its
-  badge) and the engine pill right-aligned. Generate is a `<details>` dropdown (Create / Cover /
-  Hum) that works without JS, highlights when one of its pages is open, and closes on navigation,
-  click outside or Escape (`installMenuAutoClose()` in `ui.js`, which the project page's "New take"
-  menus now share).
-- **Playback survives navigation and re-renders.** One `<audio>` lives in a player bar fixed to the
-  bottom of the page (`yue2_studio/static/player.js`), outside the routed view, so switching tabs,
-  typing in the Library search, a result card finishing or the project page's 5 s reload no longer
-  stop the song. Cards, take rows and the song page render ▶/⏸ play buttons that reflect the bar's
-  state; pressing play in a list plays just that song, **Play album** (and a track number) queues
-  the chosen takes with ⏮/⏭ and auto-advance. The bar has the native seek/time/volume controls, a
-  link to the song, Media Session metadata/keys, and ✕ to stop; the last song and position are
-  remembered in `localStorage` and restored paused on reload. Routing no longer stops playback; the
-  MIDI score preview and the hum recording preview stay page-local (and still pause the bar, and
-  vice versa).
-
-### Removed
-- Per-card `<audio controls>` elements in the Create results, Library, song page and project page
-  (chosen take, take rows and the album player).
-
-## Unreleased — Projects
+## 2026-09-18 — Projects, global player, header nav
 
 ### Added
 - **Projects, tracks and takes** (backend). A project is an ordered tracklist of named tracks; jobs
@@ -60,6 +37,27 @@ All notable changes to YuE2 Studio. Dates are when the work was merged to `main`
 - `scripts/mock_api.py` mirrors the projects routes in memory; `docs/API.md` §2–§5 document the
   `Project` / `Track` / `Take` models, endpoints, `#/projects` + `#/project/{id}` routing and the
   "Album from takes" flow.
+
+### Changed
+- **Header nav reorganised.** `Generate ▾ · Projects · Library · Settings`, then `Queue` (with its
+  badge) and the engine pill right-aligned. Generate is a `<details>` dropdown (Create / Cover /
+  Hum) that works without JS, highlights when one of its pages is open, and closes on navigation,
+  click outside or Escape (`installMenuAutoClose()` in `ui.js`, which the project page's "New take"
+  menus now share).
+- **Playback survives navigation and re-renders.** One `<audio>` lives in a player bar fixed to the
+  bottom of the page (`yue2_studio/static/player.js`), outside the routed view, so switching tabs,
+  typing in the Library search, a result card finishing or the project page's 5 s reload no longer
+  stop the song. Cards, take rows and the song page render ▶/⏸ play buttons that reflect the bar's
+  state; pressing play in a list plays just that song, **Play album** (and a track number) queues
+  the chosen takes with ⏮/⏭ and auto-advance. The bar has the native seek/time/volume controls, a
+  link to the song, Media Session metadata/keys, and ✕ to stop; the last song and position are
+  remembered in `localStorage` and restored paused on reload. Routing no longer stops playback; the
+  MIDI score preview and the hum recording preview stay page-local (and still pause the bar, and
+  vice versa).
+
+### Removed
+- Per-card `<audio controls>` elements in the Create results, Library, song page and project page
+  (chosen take, take rows and the album player).
 
 ## 2026-09-17 — LoRA adapters, hum to song, uploads management
 
