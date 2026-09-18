@@ -1,5 +1,6 @@
 import { api, songUrl } from "../api.js";
 import { confirmDialog, fill, fmt, h, jobTitle, loraLabel, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
+import { playButton, player } from "../player.js";
 
 export async function songView({ el, param, app }) {
   let job;
@@ -19,7 +20,7 @@ export async function songView({ el, param, app }) {
   let redraw;
   abcArea.addEventListener("input", () => { clearTimeout(redraw); redraw = setTimeout(() => renderScore(scoreEl, abcArea.value), 400); });
   if (abc) renderScore(scoreEl, abc);
-  const player = scorePlayer(() => scoreEl._visual);
+  const midi = scorePlayer(() => scoreEl._visual); // page-local MIDI preview; songs go through the global player
   const styleIn = h("textarea", { id: "s-style", rows: 2 }, p.style || "");
   // Regenerate inherits the parent's seed when blank; the toggle (off by default) opts into a fresh random one.
   const seedIn = seedField({ id: "s-seed", seed: job.seed, random: false, randomLabel: "Random seed (instead of inheriting)" });
@@ -38,7 +39,7 @@ export async function songView({ el, param, app }) {
       // RegenerateParams: seed null = inherit parent, so a random seed must be rolled client-side.
       const style = styleIn.value.trim(), seed = seedIn.isRandom() ? randomSeed() : seedIn.value();
       await api.submit({ kind: "regenerate", ...presets.value(), loras: loras.value(), track_id: trackId(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
-      toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = afterSubmit();
+      toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); midi.stop(); location.hash = afterSubmit();
     } catch (e) { toastError(e); regenBtn.disabled = false; }
   }
   async function variations() {
@@ -58,7 +59,7 @@ export async function songView({ el, param, app }) {
   }
   async function remove() {
     if (!confirmDialog(`Delete “${jobTitle(job)}” and its files?`)) return;
-    try { await api.remove(job.id); toast("Deleted", "ok"); location.hash = "#/library"; } catch (e) { toastError(e); }
+    try { await api.remove(job.id); player.remove(job.id); toast("Deleted", "ok"); location.hash = "#/library"; } catch (e) { toastError(e); }
   }
 
   // -- project membership: new takes made from a take land in the same track; the panel attaches/rates/chooses/detaches.
@@ -119,13 +120,13 @@ export async function songView({ el, param, app }) {
     h("div", { class: "cols" },
       h("div", { class: "stack" },
         job.artifacts.audio ? h("div", { class: "panel stack" },
-          h("audio", { controls: true, preload: "metadata", src: songUrl(job.id, "audio.flac") }),
+          h("div", { class: "row" }, playButton(job, { label: true, size: "" }), h("span", { class: "hint" }, "Playback controls are in the bar at the bottom.")),
           h("div", { class: "row" }, h("a", { class: "btn sm", href: songUrl(job.id, "audio.flac"), download: true }, "Download FLAC"), h("a", { class: "btn sm", href: songUrl(job.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn sm", href: songUrl(job.id, "artifacts.zip") }, "artifacts.zip"), h("span", { class: "spacer" }), h("button", { class: "ghost sm danger", onclick: remove }, "Delete"))) : null,
         h("section", { class: "panel stack" }, h("h3", {}, "Request"),
           h("p", {}, h("span", { class: "muted small", style: "text-transform:uppercase;letter-spacing:.05em" }, "Style "), p.style || "—"),
           h("pre", { class: "block lyrics-block", "aria-label": "Lyrics" }, p.lyrics || "—")),
         h("section", { class: "stack" }, h("h3", {}, job.kind === "hum" ? (p.melody === "hum_only" ? "Score (from your hum)" : p.melody === "continue" ? "Continued score" : "Score") : "Score"),
-          abc ? [scoreEl, h("div", { class: "row" }, player, h("span", { class: "hint" }, "Edit the ABC below; the score re-renders as you type.")), abcArea]
+          abc ? [scoreEl, h("div", { class: "row" }, midi, h("span", { class: "hint" }, "Edit the ABC below; the score re-renders as you type.")), abcArea]
             : h("p", { class: "muted" }, "No score for this song (mode off or planning did not finish)."),
           h("div", { class: "panel stack" },
             h("label", { class: "field" }, h("span", { class: "lbl" }, "Style (optional edit)"), styleIn),
@@ -150,5 +151,5 @@ export async function songView({ el, param, app }) {
           t.abc_tps || t.semantic_tps ? h("p", { class: "hint num" }, `ABC ${fmt.tps(t.abc_tps)} · semantic ${fmt.tps(t.semantic_tps)}`) : null),
         job.artifacts.plan ? h("div", { class: "panel" }, planDetails) : null)));
   paintProject();
-  return { unmount: () => player.stop() };
+  return { unmount: () => midi.stop() };
 }

@@ -2,6 +2,24 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — Global player
+
+### Changed
+- **Playback survives navigation and re-renders.** One `<audio>` lives in a player bar fixed to the
+  bottom of the page (`yue2_studio/static/player.js`), outside the routed view, so switching tabs,
+  typing in the Library search, a result card finishing or the project page's 5 s reload no longer
+  stop the song. Cards, take rows and the song page render ▶/⏸ play buttons that reflect the bar's
+  state; pressing play in a list plays just that song, **Play album** (and a track number) queues
+  the chosen takes with ⏮/⏭ and auto-advance. The bar has the native seek/time/volume controls, a
+  link to the song, Media Session metadata/keys, and ✕ to stop; the last song and position are
+  remembered in `localStorage` and restored paused on reload. Routing no longer stops playback; the
+  MIDI score preview and the hum recording preview stay page-local (and still pause the bar, and
+  vice versa).
+
+### Removed
+- Per-card `<audio controls>` elements in the Create results, Library, song page and project page
+  (chosen take, take rows and the album player).
+
 ## Unreleased — Projects
 
 ### Added

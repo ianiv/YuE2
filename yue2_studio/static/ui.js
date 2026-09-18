@@ -43,6 +43,7 @@ export function applyTheme(theme, { persist = true } = {}) {
 export const store = {
   get(k, fallback) { try { const v = localStorage.getItem("yue2." + k); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
   set(k, v) { try { localStorage.setItem("yue2." + k, JSON.stringify(v)); } catch { /* ignore */ } },
+  remove(k) { try { localStorage.removeItem("yue2." + k); } catch { /* ignore */ } },
 };
 
 export const fmt = {
