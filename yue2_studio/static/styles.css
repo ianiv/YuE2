@@ -172,11 +172,33 @@ pre.block { margin: 0; padding: 10px; background: var(--surface-2); border-radiu
 .toast.err { border-left-color: var(--err); } .toast.ok { border-left-color: var(--ok); }
 .toast button { margin-left: auto; }
 
+/* player bar: fixed under everything, outside #view so re-renders never touch its <audio> */
+body { --player-h: 56px; }
+.player-bar { position: fixed; inset: auto 0 0 0; z-index: 40; background: var(--surface); border-top: 1px solid var(--border); box-shadow: var(--shadow); }
+body:not(.has-player) .player-bar { display: none; }
+.player-inner { max-width: 1080px; margin: 0 auto; min-height: var(--player-h); padding: 8px 16px; display: flex; align-items: center; gap: 8px; }
+.player-bar audio { flex: 1 1 260px; max-width: 520px; width: auto; min-width: 0; }
+.player-bar .now { flex: 1 1 160px; min-width: 0; display: flex; flex-direction: column; color: var(--text); line-height: 1.25; }
+.player-bar .now:hover { text-decoration: none; color: var(--accent); }
+.player-bar .now .title, .player-bar .now .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-bar .now .title { font-weight: 600; }
+.player-bar .now .sub { font-size: 12px; color: var(--muted); }
+.player-bar .pos { font-size: 12px; color: var(--muted); white-space: nowrap; }
+body.has-player main { padding-bottom: calc(48px + var(--player-h)); }
+body.has-player #toasts { bottom: calc(16px + var(--player-h)); }
+@media (max-width: 640px) {
+  body { --player-h: 100px; }
+  .player-inner { flex-wrap: wrap; }
+  .player-bar audio { flex: 1 1 100%; max-width: none; order: 9; }
+}
+/* play buttons (playButton() in player.js): ▶ normally, ⏸ + accent while that song is playing */
+button.play { flex: 0 0 auto; }
+button.play.playing { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
 /* create: form | results */
 .cols.results-layout { grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); }
 @media (max-width: 760px) { .cols.results-layout { grid-template-columns: minmax(0, 1fr); } }
-@media (min-width: 761px) { .results-col { position: sticky; top: 60px; max-height: calc(100vh - 76px); overflow-y: auto; padding-right: 2px; } }
-.results-col .card audio { margin-top: 2px; }
+@media (min-width: 761px) { .results-col { position: sticky; top: 60px; max-height: calc(100vh - 76px); overflow-y: auto; padding-right: 2px; } body.has-player .results-col { max-height: calc(100vh - 76px - var(--player-h)); } }
 pre.lyrics-block { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font); font-size: 14px; line-height: 1.5; max-height: none; }
 
 /* library multi-select */
@@ -200,7 +222,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .inline-edit:hover { background: var(--surface-2); }
 .inline-edit.placeholder { color: var(--muted); font-style: italic; }
 h1.inline-edit, .inline-input { min-width: 120px; }
-.album-player audio { margin-top: 2px; }
 .album-player .btn.disabled { opacity: .5; cursor: not-allowed; }
 ol.tracklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .track { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
@@ -215,7 +236,6 @@ ol.tracklist { list-style: none; margin: 0; padding: 0; display: flex; flex-dire
 button.track-n { padding: 2px 6px; }
 .track-title { flex: 1; min-width: 0; font-weight: 650; font-size: 15px; overflow-wrap: anywhere; }
 .track-title .inline-edit { display: inline-block; max-width: 100%; }
-.track .chosen audio { max-width: 520px; }
 .track details.takes > summary { font-size: 12px; }
 .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .take-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--bg); }
@@ -224,7 +244,6 @@ button.track-n { padding: 2px 6px; }
 .take-row .meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
 .take-row .meta b { color: var(--text); font-weight: 600; }
 .take-row .title { font-weight: 600; overflow-wrap: anywhere; }
-.take-row audio { max-width: 520px; }
 .take-controls { gap: 8px; }
 .take-controls .note-wrap { flex: 1 1 160px; min-width: 0; }
 .take-controls .note { padding: 3px 8px; font-size: 12px; }

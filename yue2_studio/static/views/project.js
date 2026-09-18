@@ -1,5 +1,6 @@
-import { albumUrl, api, songUrl } from "../api.js";
+import { albumUrl, api } from "../api.js";
 import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, modeLabel, store, takeControls, toast, toastError } from "../ui.js";
+import { playButton, player, trackOf } from "../player.js";
 
 const SORTS = [["added", "Added"], ["stars", "Stars"], ["thumbs", "Thumbs"]];
 const FILTERS = [["all", "All"], ["up", "👍"], ["unrated", "Unrated"]];
@@ -7,7 +8,7 @@ const isLive = (j) => j.status === "queued" || j.status === "running";
 const playable = (t) => !!(t.chosen && t.chosen.artifacts && t.chosen.artifacts.audio);
 
 /**
- * #/project/<id> — editable name/description, album player over the chosen takes, ZIP export,
+ * #/project/<id> — editable name/description, "Play album" (the chosen takes queued in the global player), ZIP export,
  * draggable tracklist (↑/↓ fallback) and per-track takes with thumbs/stars/note, Choose and Detach.
  */
 export async function projectView({ el, param, app }) {
@@ -26,38 +27,33 @@ export async function projectView({ el, param, app }) {
   const syncStatus = (s) => { zipMp3.hidden = !(s && s.ffmpeg); };
   const deleteBtn = h("button", { class: "ghost sm danger", onclick: () => project && removeProject() }, "Delete project");
 
-  // -- album player: one <audio> over the chosen takes, in tracklist order -------------------------
-  const audio = h("audio", { controls: true, preload: "none", "aria-label": "Album player" });
+  // -- album: the chosen takes, in tracklist order, queued in the global player ----------------------
   const playBtn = h("button", { class: "primary sm", id: "album-play", onclick: () => project && toggleAlbum() }, "▶ Play album");
   const nowLabel = h("span", { class: "hint" });
-  let queue = [], idx = -1;
-  const albumPlayer = h("div", { class: "album-player panel stack", style: "gap:8px" }, h("div", { class: "row between" }, h("div", { class: "row" }, playBtn, nowLabel), h("div", { class: "row", style: "gap:6px" }, zipFlac, zipMp3)), audio);
-  function playAt(i) {
-    queue = project.tracks.filter(playable);
-    if (i < 0 || i >= queue.length) { stopAlbum(); return; }
-    idx = i;
-    const t = queue[i];
-    audio.src = songUrl(t.chosen.id, "audio.flac");
-    audio.play().catch((e) => { console.warn("album play", e.message); syncAlbum(); });
-    syncAlbum();
-  }
-  function stopAlbum() { idx = -1; audio.pause(); audio.removeAttribute("src"); syncAlbum(); }
+  const albumPlayer = h("div", { class: "album-player panel stack", style: "gap:8px" }, h("div", { class: "row between" }, h("div", { class: "row" }, playBtn, nowLabel), h("div", { class: "row", style: "gap:6px" }, zipFlac, zipMp3)));
+  const albumTracks = () => project.tracks.filter(playable).map((t) => trackOf(t.chosen, t.name));
+  let bar = { queue: [], playing: false }; // last player state (player.on)
+  /** True only when the bar's queue IS this album (same chosen takes, tracklist order) — a chosen take
+   *  played on its own from the Library is not the album: no ⏮/⏭, no advance, so no "Pause album". */
+  const inAlbum = () => { const ids = project ? project.tracks.filter(playable).map((t) => t.chosen.id) : []; return ids.length > 0 && bar.queue.length === ids.length && bar.queue.every((q, i) => q.id === ids[i]); };
+  /** The track whose chosen take the player currently holds (however it got there), or null. */
+  const currentTrack = () => { const c = player.current(); return c && project ? project.tracks.find((t) => playable(t) && t.chosen.id === c.id) || null : null; };
+  const playAt = (i) => player.play(albumTracks(), i);
   function toggleAlbum() {
-    if (idx >= 0 && !audio.paused) audio.pause();
-    else if (idx >= 0 && audio.src) audio.play().catch(() => {});
-    else playAt(0);
+    const c = player.current(), t = currentTrack();
+    if (inAlbum() && c) player.toggle(c.id);
+    else playAt(t ? project.tracks.filter(playable).indexOf(t) : 0); // same id keeps the position: a lone chosen take becomes the album from its track
   }
-  function syncAlbum() {
-    const playing = idx >= 0 && !audio.paused;
-    playBtn.textContent = playing ? "⏸ Pause album" : idx >= 0 ? "▶ Resume album" : "▶ Play album";
+  function syncAlbum(state = null) {
+    if (state) bar = state;
+    if (unmounted) return;
+    const album = inAlbum(), t = currentTrack(), playing = album && bar.playing;
+    playBtn.textContent = playing ? "⏸ Pause album" : album ? "▶ Resume album" : "▶ Play album";
     playBtn.disabled = !project || !project.tracks.some(playable);
-    const t = queue[idx];
-    nowLabel.textContent = t ? `${idx + 1}/${queue.length} · ${t.name} — ${jobTitle(t.chosen)}` : project && project.tracks.some(playable) ? `${project.tracks.filter(playable).length} chosen take${project.tracks.filter(playable).length === 1 ? "" : "s"} in tracklist order` : "Choose a take on a track to build the album";
+    const tracks = project ? project.tracks.filter(playable) : [];
+    nowLabel.textContent = album && t ? `${tracks.indexOf(t) + 1}/${tracks.length} · ${t.name} — ${jobTitle(t.chosen)}` : tracks.length ? `${tracks.length} chosen take${tracks.length === 1 ? "" : "s"} in tracklist order` : "Choose a take on a track to build the album";
     list.querySelectorAll("li.track").forEach((li) => li.classList.toggle("playing", !!t && li.dataset.id === t.id));
   }
-  audio.addEventListener("ended", () => playAt(idx + 1));
-  audio.addEventListener("play", syncAlbum);
-  audio.addEventListener("pause", syncAlbum);
 
   // -- tracklist -------------------------------------------------------------------------------
   const list = h("ol", { class: "tracklist" });
@@ -75,6 +71,7 @@ export async function projectView({ el, param, app }) {
     list,
     h("div", { class: "panel", style: "margin-top:14px" }, newTrackForm));
   fill(el, view);
+  const offPlayer = player.on(syncAlbum); // after `list` exists: on() paints right away
 
   function paint() {
     if (unmounted || !project) return;
@@ -97,8 +94,8 @@ export async function projectView({ el, param, app }) {
     const name = inlineEdit(t.name, (v) => patchTrack(t, { name: v }), { cls: "track-name", title: "Click to rename" });
     const chosenBox = t.chosen
       ? h("div", { class: "chosen stack", style: "gap:4px" },
-        h("div", { class: "row small" }, h("span", { class: "tag ok" }, "chosen"), h("a", { href: `#/song/${t.chosen.id}` }, jobTitle(t.chosen)), h("span", { class: "muted num" }, fmt.dur(t.chosen.timing && t.chosen.timing.audio_seconds))),
-        playable(t) ? h("audio", { controls: true, preload: "none", src: songUrl(t.chosen.id, "audio.flac") }) : h("span", { class: "hint" }, "Audio missing"))
+        h("div", { class: "row small" }, playable(t) ? playButton(t.chosen, { sub: t.name }) : null, h("span", { class: "tag ok" }, "chosen"), h("a", { href: `#/song/${t.chosen.id}` }, jobTitle(t.chosen)), h("span", { class: "muted num" }, fmt.dur(t.chosen.timing && t.chosen.timing.audio_seconds)),
+          playable(t) ? null : h("span", { class: "hint" }, "Audio missing")))
       : h("div", { class: "chosen hint" }, t.takes.length ? "No take chosen yet — pick one below." : "No takes yet — make a new take or add songs from the Library.");
     const menu = h("details", { class: "menu" }, h("summary", { class: "btn sm" }, "New take ▾"),
       h("div", { class: "menu-list" },
@@ -161,6 +158,7 @@ export async function projectView({ el, param, app }) {
     return h("div", { class: "take-row" + (chosen ? " chosen" : "") + (live ? " live" : ""), dataset: { id: j.id } },
       h("div", { class: "row between" },
         h("div", { class: "row", style: "gap:6px;min-width:0" },
+          canChoose ? playButton(j, { sub: t.name }) : null,
           h("span", { class: `tag ${j.status === "done" ? "ok" : j.status === "failed" ? "err" : live ? "accent" : ""}` }, j.status + stage),
           live ? h("span", { class: "title" }, jobTitle(j)) : h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j)),
           h("span", { class: "tag" }, j.kind)),
@@ -171,7 +169,6 @@ export async function projectView({ el, param, app }) {
         j.loras && j.loras.length ? h("span", {}, "lora ", h("b", {}, loraLabel(j.loras))) : null,
         h("span", { title: j.take.added_at }, "added ", fmt.when(j.take.added_at)),
         j.error ? h("span", { class: "tag err", title: j.error }, "error") : null),
-      j.status === "done" && j.artifacts.audio && !chosen ? h("audio", { controls: true, preload: "none", src: songUrl(j.id, "audio.flac") }) : null,
       takeControls(j, { onChange: (nj) => { const k = t.takes.findIndex((x) => x.id === nj.id); if (k >= 0) t.takes[k] = nj; } }));
   }
 
@@ -204,7 +201,7 @@ export async function projectView({ el, param, app }) {
   }
   async function removeTrack(t) {
     if (!confirmDialog(`Delete track “${t.name}”? Its ${t.takes.length} take${t.takes.length === 1 ? "" : "s"} are detached; the songs are kept.`)) return;
-    try { await api.removeTrack(t.id); if (queue[idx] && queue[idx].id === t.id) stopAlbum(); await load(); toast("Track deleted", "ok", { timeout: 2500 }); } catch (e) { toastError(e); }
+    try { await api.removeTrack(t.id); await load(); toast("Track deleted", "ok", { timeout: 2500 }); } catch (e) { toastError(e); }
   }
   async function detach(t, j) {
     if (!confirmDialog(`Remove “${jobTitle(j)}” from “${t.name}”? The song is kept; its rating is dropped.`)) return;
@@ -217,15 +214,15 @@ export async function projectView({ el, param, app }) {
 
   await load(); // 404 → notFound; other errors → errbox with Retry (the listener below guards on `project`)
   syncStatus(app.status);
-  // While a take is still queued/running, refresh with the 5 s status poll (but never under the user's cursor).
+  // While a take is still queued/running, refresh with the 5 s status poll (but never under the user's
+  // cursor). Playback lives in the global bar, so a reload never interrupts it.
   const onStatus = (s) => {
     syncStatus(s);
     if (!project || !project.tracks.some((t) => t.takes.some(isLive))) return;
     const a = document.activeElement;
     if (a && el.contains(a) && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return;
-    if ([...list.querySelectorAll("audio")].some((m) => !m.paused)) return;
     load({ quiet: true });
   };
   app.listeners.add(onStatus);
-  return { unmount() { unmounted = true; app.listeners.delete(onStatus); audio.pause(); document.title = "YuE2 Studio"; } };
+  return { unmount() { unmounted = true; app.listeners.delete(onStatus); offPlayer(); document.title = "YuE2 Studio"; } };
 }

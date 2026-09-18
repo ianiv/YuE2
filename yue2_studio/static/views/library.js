@@ -1,5 +1,6 @@
 import { api, songUrl } from "../api.js";
 import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectPicker, projectTag, store, toast, toastError } from "../ui.js";
+import { playButton, player } from "../player.js";
 
 /** Index of each job inside its group (API has no group endpoint). Order: the submit response's
  * job order if we remembered it, else Job.seq (submit order), then seed, then created_at. */
@@ -102,7 +103,7 @@ export async function libraryView({ el, query }) {
   async function deleteMany(ids, limit = 4) {
     const queue = ids.slice(); let ok = 0, bad = 0;
     await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, async () => {
-      while (queue.length) { const id = queue.shift(); try { await api.remove(id); ok++; } catch (e) { bad++; console.warn("delete", id, e.message); } }
+      while (queue.length) { const id = queue.shift(); try { await api.remove(id); player.remove(id); ok++; } catch (e) { bad++; console.warn("delete", id, e.message); } }
     }));
     return { ok, failed: bad };
   }
@@ -166,14 +167,13 @@ export async function libraryView({ el, query }) {
         h("div", { class: "row nowrap", style: "min-width:0" }, selBox(j), h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j))),
         h("div", { class: "row", style: "gap:4px" }, h("span", { class: "tag" }, j.kind), g ? h("a", { class: "tag accent", href: `#/library?group=${g.gid}`, title: "Show this group", onclick: (e) => { e.preventDefault(); filters.group = g.gid; f.group.value = g.gid; load(); } }, `var ${g.n}/${g.total}`) : null, projectTag(j))),
       h("p", { class: "small muted" }, fmt.excerpt(j.params.style, 90)),
-      h("audio", { controls: true, preload: "none", src: songUrl(j.id, "audio.flac") }),
       h("div", { class: "meta" },
         h("span", {}, h("b", { class: "num" }, fmt.dur(j.timing && j.timing.audio_seconds))),
         h("span", {}, "preset ", h("b", {}, j.preset)), j.loras && j.loras.length ? h("span", {}, "lora ", h("b", {}, loraLabel(j.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, j.seed)),
         h("span", {}, "mode ", h("b", {}, modeLabel(j))), h("span", { title: j.created_at }, fmt.when(j.created_at)),
         j.truncated ? h("span", { class: "tag warn", title: j.truncated.reason }, "truncated") : null),
       h("div", { class: "row between" },
-        h("div", { class: "row", style: "gap:4px" }, h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.flac"), download: true }, "FLAC"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "artifacts.zip") }, "ZIP")),
+        h("div", { class: "row", style: "gap:4px" }, playButton(j, { label: true }), h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.flac"), download: true }, "FLAC"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "artifacts.zip") }, "ZIP")),
         h("button", { class: "ghost sm danger", onclick: () => remove(j) }, "Delete")));
   }
 
@@ -187,7 +187,7 @@ export async function libraryView({ el, query }) {
 
   async function remove(j) {
     if (!confirmDialog(`Delete “${jobTitle(j)}” and its files? This cannot be undone.`)) return;
-    try { await api.remove(j.id); toast("Deleted", "ok"); load(); } catch (e) { toastError(e); }
+    try { await api.remove(j.id); player.remove(j.id); toast("Deleted", "ok"); load(); } catch (e) { toastError(e); }
   }
   await load();
   if (filters.project) {

@@ -1,6 +1,7 @@
 // Router, header status, theme.
 import { api } from "./api.js";
-import { applyTheme, fill, h, stopPlayback, store } from "./ui.js";
+import { applyTheme, fill, h, store } from "./ui.js";
+import "./player.js"; // builds the persistent player bar outside #view
 import { createView } from "./views/create.js";
 import { queueView } from "./views/queue.js";
 import { libraryView } from "./views/library.js";
@@ -47,7 +48,6 @@ async function route() {
   const gen = ++routeGen;
   if (current && current.unmount) { try { current.unmount(); } catch (e) { console.error(e); } }
   current = null;
-  stopPlayback(); // the outgoing view's players are about to leave the DOM
   document.querySelectorAll("nav.main a").forEach((a) => {
     const href = a.getAttribute("href");
     const active = href === `#/${name}` || (name === "song" && href === "#/library") || (name === "project" && href === "#/projects");

@@ -1,6 +1,7 @@
 // Shared job cards: a live (queued/running) card driven by SSE, and result cards for terminal jobs.
 import { api, songUrl, subscribe } from "../api.js";
 import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectTag, renderScore, STAGE_NAMES, stagesFor, toast, toastError } from "../ui.js";
+import { playButton } from "../player.js";
 
 const groupTag = (job) => job.group_id ? h("span", { class: "tag accent", title: groupLabel(job.group_id) || "variation group" }, groupLabel(job.group_id) ? fmt.excerpt(groupLabel(job.group_id), 28) : "group") : null;
 
@@ -110,7 +111,7 @@ export function liveCard(job, { onFinish, onGone, scoreCollapsed = false } = {})
   return c;
 }
 
-/** Result card for a terminal job (done → inline player; failed/cancelled → status + error). */
+/** Result card for a terminal job (done → play button for the global player; failed/cancelled → status + error). */
 export function resultCard(job, { onUseSeed, onDismiss } = {}) {
   const t = job.timing || {};
   const head = h("div", { class: "row between" },
@@ -127,7 +128,7 @@ export function resultCard(job, { onUseSeed, onDismiss } = {}) {
     return h("div", { class: "card", dataset: { id: job.id } }, head, job.error ? h("div", { class: "errbox mono" }, job.error) : null, meta);
   }
   return h("div", { class: "card", dataset: { id: job.id } }, head,
-    h("audio", { controls: true, preload: "metadata", src: songUrl(job.id, "audio.flac") }),
+    h("div", { class: "row" }, playButton(job, { label: true })),
     meta,
     h("div", { class: "row", style: "gap:4px" },
       h("a", { class: "btn sm", href: `#/song/${job.id}` }, "Open"),

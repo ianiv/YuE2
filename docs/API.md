@@ -458,10 +458,10 @@ Single `index.html`; the router reads `location.hash`:
 | `#/create` (default) | Create form; `?from=<job_id>` prefills from an existing job ("More variations") |
 | `#/queue` | queued + running jobs, live via one `EventSource` per visible job |
 | `#/library` | `GET /api/jobs?status=done` (+ filters `kind`, `group`, `project`); "Uploads" panel over `GET /api/uploads` with delete / prune; `?attach=<track_id>` opens multi-select with "Add to project" preset to that track; cards show a `Project › Track` tag from `job.take` |
-| `#/song/{id}` | song detail (player, score, timing, regenerate); "Project" panel: attach via picker, or rate (`PATCH /api/takes/{id}`), "Choose as final take", Detach; regenerate/variations from a take pass `track_id` |
+| `#/song/{id}` | song detail (play button; playback runs in the bottom player bar and survives navigation; score, timing, regenerate); "Project" panel: attach via picker, or rate (`PATCH /api/takes/{id}`), "Choose as final take", Detach; regenerate/variations from a take pass `track_id` |
 | `#/cover` | upload + cover form |
 | `#/projects` | `GET /api/projects` cards (name, `N tracks · M chosen`, updated) + "New project" form |
-| `#/project/{id}` | `GET /api/projects/{id}`: editable name/description, album player over the chosen takes, Export ZIP (FLAC / MP3 when `status.ffmpeg`), draggable tracklist (`PUT …/order`), per-track takes with thumbs/stars/note, Choose, Detach, "New take" → `#/create?track=`, `#/cover?track=`, `#/hum?track=` |
+| `#/project/{id}` | `GET /api/projects/{id}`: editable name/description, "Play album" queues the chosen takes in the bottom player bar (playback survives navigation and reloads of the page), Export ZIP (FLAC / MP3 when `status.ffmpeg`), draggable tracklist (`PUT …/order`), per-track takes with thumbs/stars/note, Choose, Detach, "New take" → `#/create?track=`, `#/cover?track=`, `#/hum?track=` |
 | `#/settings` | settings drawer/page |
 
 `#/create`, `#/cover` and `#/hum` read `?track=<track_id>` (`GET /api/tracks/{id}` for the banner "New take for
