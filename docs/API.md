@@ -29,13 +29,14 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | str | **uuid4 hex, 32 chars, no dashes** (`"3f9a…"`); also the song dir name `data/songs/<id>/` |
-| `kind` | enum(create\|regenerate\|cover) | `variations` is expanded on submit; stored jobs are never `variations` |
+| `kind` | enum(create\|regenerate\|cover\|hum) | `variations` is expanded on submit; stored jobs are never `variations` |
 | `status` | enum(queued\|running\|done\|failed\|cancelled) | terminal = done/failed/cancelled |
 | `group_id` | str? | set for variations members |
 | `parent_id` | str? | set for `regenerate` (source job) |
 | `preset` | enum(quality\|fast\|custom) | |
 | `precision` | enum(bf16\|8bit\|4bit) | resolved from preset |
 | `ode_steps` | int | resolved from preset (quality=32, fast=8) |
+| `loras` | [LoraRef] | LoRA adapters merged for this job, in order; `[]` when none |
 | `seed` | int | the resolved seed (never null) |
 | `params` | object | `CreateParams` / `RegenerateParams` / `CoverParams` per `kind`, with defaults filled in |
 | `title` | str? | copied from `params.title`, else `null` |
@@ -46,7 +47,7 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 | `timing` | object? | `{"plan", "semantic", "synthesize", "decode", "transcribe", "e2e": float?, "abc_tps": float?, "semantic_tps": float?, "audio_seconds": float?}`; set when done; every key present, `null` when not applicable (`transcribe` for non-covers, `abc_tps` for a supplied score) |
 | `truncated` | object? | `{"phase": "abc"\|"semantic", "reason": str}` if generation hit a length limit; else null |
 | `progress` | ProgressEvent? | last event emitted (also for terminal jobs); null if none yet |
-| `artifacts` | object | `{"audio": bool, "score": bool, "plan": bool, "transcription": bool}`; all false until produced |
+| `artifacts` | object | `{"audio": bool, "score": bool, "plan": bool, "transcription": bool, "hum": bool}`; all false until produced |
 | `position` | int? | 0-based queue position while `queued`; null otherwise |
 | `seq` | int | server-wide insertion counter (strictly increasing); order by it when `created_at` ties (variations members share a millisecond) |
 
@@ -88,6 +89,24 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 | `seed` | int? | random |
 | `title` | str? | defaults to upload filename stem |
 
+### HumParams
+
+| Field | Type | Default / rule |
+|-------|------|----------------|
+| `upload_id` | str | required; the hum recording (any accepted upload, incl. `webm`/`m4a` from the in-browser recorder); 404 if unknown |
+| `style` | str | required |
+| `lyrics` | str | required |
+| `seed` | int? | random |
+| `title` | str? | defaults to the upload filename stem |
+| `melody` | enum(continue\|hum_only\|ignore) | `continue`: the transcribed hum is the *open* start of the score and the planner continues it; `hum_only`: the hum is the whole melody (closed score, like a cover); `ignore`: the planner writes its own score (needs `adapter`) |
+| `adapter` | str? | a `kind="hum"` adapter from `Status.hum.adapters` (400 if unknown, unusable, or a plain LoRA); without one only the score continuation runs |
+| `hum_influence` | float | 1.0; 0..3; classifier-free guidance on the decoder's hum channel (1 = as trained, 0 = no hum, ≠1 costs ~2× synthesis) |
+| `offset_s` | float | 0; 0..600; where the hum's carrier starts inside the song |
+
+Hum jobs always run with `cot=melody`; the transcription is `melody-vocal`. `Job.artifacts.hum` is true once
+`hum/hum.abc` (the open score) exists. Hum adapters are rejected in the `loras` stack (400) and plain LoRAs
+are rejected as `adapter`.
+
 ### VariationsParams (submit only)
 
 | Field | Type | Rule |
@@ -101,11 +120,34 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 
 | Field | Type | Rule |
 |-------|------|------|
-| `kind` | enum(create\|regenerate\|cover\|variations) | required |
+| `kind` | enum(create\|regenerate\|cover\|hum\|variations) | required |
 | `params` | object | required, per kind |
 | `preset` | enum(quality\|fast\|custom)? | default `settings.default_preset` |
 | `precision` | enum(bf16\|8bit\|4bit)? | only honoured when `preset=custom`; required then |
 | `ode_steps` | int? | 4..64; only honoured when `preset=custom`; required then |
+| `loras` | [LoraRef]? | adapters to merge, in order, at most 8, names unique; omitted = none (`regenerate`: inherited from the parent; send `[]` to clear) |
+
+### LoraRef
+
+`{"name": str, "scale": float = 1.0}` — `name` is an entry of `Status.loras.adapters` (letters, digits, `. _ -`);
+`scale` in `[0, 4]` multiplies the adapter's own baked-in scale (1 = as trained). An unknown or unusable name is a
+400 `validation_error` (`"unknown or unusable LoRA adapter '<name>'"`).
+
+### LoraAdapter (`Status.loras.adapters[]`, `GET /api/loras`)
+
+```json
+{"name": "ar_lora_inst_v3abc.bf16", "path": "/abs/models/loras/ar_lora_inst_v3abc.bf16.safetensors",
+ "format": "safetensors" | "peft", "valid": true, "error": null,
+ "rank": 64, "scale": 1.0, "dtype": "BF16", "parts": ["ar"], "ar_modules": 196, "nar_modules": 0,
+ "targets": ["mlp.down_proj", "…", "self_attn.q_proj"], "replaced": [],
+ "size_bytes": 139502088, "metadata": {"intended_cot": "full", "rank": "64", "lora_scale": "1.0"}}
+```
+
+`parts` ⊆ `["ar", "nar"]` says which model the adapter touches (AR planner / acoustic decoder); `replaced` lists
+NAR layers the file ships whole (`llm2vae`, `vae2llm`); `metadata` is the safetensors `__metadata__` filtered to
+a few informative keys. `kind` is `"lora"` or `"hum"`: a hum-to-song adapter also carries `hum_proj` (count) and
+`inject_layers` (NAR layer indices, from its metadata) and is selected as `HumParams.adapter`, never in `loras`.
+`valid=false` entries carry the reason in `error` and cannot be submitted.
 
 ### Group
 
@@ -144,7 +186,8 @@ and immediately before `done` with the terminal status.
 
 ```json
 {
-  "engine":  {"state": "ready", "precision": "bf16", "memory_gib": 11.2, "current_job_id": null},
+  "engine":  {"state": "ready", "precision": "bf16", "memory_gib": 11.2, "current_job_id": null,
+              "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}]},
   "queue":   {"queued": 2, "running": null},
   "presets": [
     {"name": "quality", "label": "Quality", "precision": "bf16", "ode_steps": 32, "description": "BF16 AR, 32 ODE steps"},
@@ -154,6 +197,8 @@ and immediately before `done` with the terminal status.
   "models":  {"converted_dir": "/abs/models/converted", "vae_dir": "/abs/models/vae", "present": true,
               "precisions": ["bf16", "8bit"]},
   "cover":   {"available": false, "reasons": ["MERT-v2-FullSong not downloaded"]},
+  "hum":     {"available": true, "reasons": [], "adapters": ["hum_adapter_v1_combined"]},
+  "loras":   {"dir": "/abs/models/loras", "adapters": [LoraAdapter, …]},
   "ffmpeg":  true,
   "fake":    false,
   "version": "0.1.0"
@@ -163,22 +208,43 @@ and immediately before `done` with the terminal status.
 `engine.state ∈ cold|loading|ready|busy`; `precision`/`memory_gib` null when cold (`memory_gib` is the MLX active
 memory sampled by the worker at stage boundaries, so it lags slightly). `queue.running` = job id or null.
 `models.precisions` lists the AR weight files present; `fake` is true under `--fake` (then `models.present` and
-`cover.available` are reported true so jobs can be submitted).
+`cover.available` are reported true so jobs can be submitted). `engine.loras` is the stack merged into the resident
+pipeline (`[]` when cold or none); `loras` rescans `models/loras/` on every call (header reads only).
 
 ### Settings
 
-`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system"}`
+`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system", "prune_uploads_days": null}`
 (`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
-total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`). `PUT` accepts any
+total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`; `prune_uploads_days` integer 1..365 or `null` = off:
+uploads no job references and older than that are deleted at server startup and after every job finishes, exactly
+as `POST /api/uploads/prune {"unused": true, "older_than_days": N}` would). `PUT` accepts any
 subset, ignores unknown keys, and returns the full object; a rejected patch (400) changes nothing.
+
+### Upload (`GET /api/uploads`)
+
+| field | type | notes |
+|-------|------|-------|
+| `upload_id` | str | |
+| `filename` | str | original name (the on-disk name for a broken entry without a sidecar) |
+| `ext` | str? | stored extension |
+| `seconds` | float? | duration from ffprobe at upload time |
+| `size` | int? | bytes; `null` when `broken` |
+| `created_at` | str | ISO-8601 UTC |
+| `broken` | bool | media file or sidecar is missing/unreadable — cannot be submitted, can be deleted |
+| `jobs` | `{"total": int, "active": int}` | jobs whose `params.upload_id` is this upload; `active` = queued or running |
 
 ## 3. Endpoints
 
 ### `GET /api/status` → 200 `Status` (above). Never 503; unavailability is reported in the body.
 
+### `GET /api/loras` → 200 `{"dir": str, "adapters": [LoraAdapter, …]}` — same as `Status.loras`, rescanned.
+
+`Status.hum` reports whether hum-to-song can run (the cover prerequisites plus `librosa`) and the usable hum
+adapter names; `POST /api/jobs {kind:"hum"}` answers 409 while it is unavailable.
+
 ### `POST /api/jobs`
 
-Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?}`.
+Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?, "loras"?}`.
 
 ```json
 {"kind": "create", "preset": "fast",
@@ -241,19 +307,39 @@ data: {"job": <Job JSON>}
 | `score.abc` | `text/plain; charset=utf-8` | final (or supplied) ABC |
 | `plan.json` | `application/json` | engine plan (stage 1 output) |
 | `artifacts.zip` | `application/zip` | whole song dir as written so far (a running or failed job yields `job.json`, `plan/`, …), `Content-Disposition: attachment; filename="<id>.zip"`; 404 only while the dir is empty (queued) |
-| `transcription/score.abc` | `text/plain; charset=utf-8` | cover jobs only; 404 otherwise |
+| `transcription/score.abc` | `text/plain; charset=utf-8` | cover and hum jobs; 404 otherwise |
+| `hum/hum.abc` | `text/plain; charset=utf-8` | hum jobs: the open score fed to the planner (404 for `melody=ignore`) |
+| `hum.json` | `application/json` | hum jobs: receipt (melody, adapter, influence, offset, source/transcription/prosody pointers) |
 
 404 when the job or the file does not exist (e.g. job not yet done). `{id}` is the job id. These routes also
 answer `HEAD` (players probe with it before requesting ranges).
 
 ### `POST /api/upload`
 
-`multipart/form-data`, single field `file`. Accepted extensions: `mp3 wav flac m4a ogg`; max **200 MB**.
+`multipart/form-data`, single field `file`. Accepted extensions: `mp3 wav flac m4a ogg webm mp4` (the last two
+are what `MediaRecorder` produces in Chrome / Safari); max **200 MB**.
 Stored at `data/uploads/<upload_id>.<ext>`.
 → **201** `{"upload_id": "<uuid4 hex>", "filename": "demo.mp3", "seconds": 187.4, "path_hint": "data/uploads/<id>.mp3"}`
 (`seconds` null if ffprobe unavailable). 400 bad type, 413 too large. The 200 MB cap is checked against
 `Content-Length` before the body is read (browsers always send it for `FormData`); a chunked upload without it is
 only rejected while being copied into `data/uploads/`, after the multipart parser has buffered it to a temp file.
+- **400** `validation_error` — the file is empty (0 bytes), e.g. an iCloud/Dropbox placeholder that was never downloaded.
+- **400** `validation_error` — ffprobe is installed but cannot read the file (unsupported or corrupt audio); nothing is stored.
+
+### Uploads management
+
+Uploads are kept until deleted; a finished cover/hum never reads its upload again (the song dir holds the
+transcription), so only a **queued or running** job pins one.
+
+- `GET /api/uploads?unused=` → 200 `{"uploads": [Upload, …]}`, newest first. `unused=true` keeps only uploads with
+  `jobs.total == 0`.
+- `DELETE /api/uploads/{id}` → **204** (removes the media file and its sidecar) | 404 unknown/malformed id |
+  **409** `in_use` while `jobs.active > 0`.
+- `POST /api/uploads/prune` body `{"unused": true, "older_than_days": 30}` (both optional; `unused` defaults to true,
+  `older_than_days` integer ≥ 1 or `null`) → 200 `{"deleted": n, "skipped": m}`. With `unused` every upload no job
+  references is deleted and the referenced ones are `skipped`; with `unused: false` everything without an active
+  job goes and only active ones are `skipped`. `older_than_days` restricts either to uploads created before then.
+  The `prune_uploads_days` setting runs this automatically (`unused: true`).
 
 ### `GET /api/settings` → 200 `Settings`.  `PUT /api/settings` body = partial `Settings` → 200 full `Settings` | 400.
 
@@ -270,7 +356,7 @@ Single `index.html`; the router reads `location.hash`:
 |-------|------|
 | `#/create` (default) | Create form; `?from=<job_id>` prefills from an existing job ("More variations") |
 | `#/queue` | queued + running jobs, live via one `EventSource` per visible job |
-| `#/library` | `GET /api/jobs?status=done` (+ filters `kind`, `group`) |
+| `#/library` | `GET /api/jobs?status=done` (+ filters `kind`, `group`); "Uploads" panel over `GET /api/uploads` with delete / prune |
 | `#/song/{id}` | song detail (player, score, timing, regenerate) |
 | `#/cover` | upload + cover form |
 | `#/settings` | settings drawer/page |
@@ -293,6 +379,7 @@ POST /api/jobs {kind:"regenerate", preset:<parent or chosen>,
 Cover:
 ```
 #/cover  ──POST /api/upload (multipart file)──▶ 201 {upload_id, seconds}
+         or pick a recent upload (GET /api/uploads) and skip the upload
       │ user picks task/style/lyrics/seed/preset
       ▼
 POST /api/jobs {kind:"cover", params:{upload_id, task, style, lyrics}} ──▶ 201 {job}
@@ -300,6 +387,20 @@ POST /api/jobs {kind:"cover", params:{upload_id, task, style, lyrics}} ──▶
 events: stage=load → stage=transcribe → stage=plan (abc text streams) → semantic → synthesize → decode → save → done
       ▼
 #/song/{id}: player + GET /api/songs/{id}/transcription/score.abc rendered beside the result score
+```
+
+Hum to song:
+```
+#/hum    ──POST /api/upload (drop zone, or MediaRecorder blob named hum-<stamp>.m4a|webm|ogg)──▶ 201 {upload_id}
+         or pick a recent upload (GET /api/uploads) and skip the upload
+      │ user picks melody (continue | hum_only | ignore), optional adapter + influence + offset, style/lyrics/seed/preset
+      ▼
+POST /api/jobs {kind:"hum", params:{upload_id, style, lyrics, melody, adapter, hum_influence, offset_s}} ──▶ 201 {job}
+      ▼
+events: load → transcribe (unless ignore) → hum ("Analysing hum", "Encoding hum"; adapter only) → plan (the streamed
+        abc text starts with the hum's open score) → semantic → synthesize (hum-conditioned with an adapter) → decode → save
+      ▼
+#/song/{id}: continued score + GET /api/songs/{id}/hum/hum.abc ("Your hum") + GET /api/songs/{id}/hum.json
 ```
 
 Variations: `#/create` with N>1 → `POST /api/jobs {kind:"variations", params:{count:N, base:{…}, random_seeds}}`
@@ -351,7 +452,13 @@ class Engine(Protocol):
 ```
 
 `EngineOptions` (`yue2_studio.config`): frozen dataclass `{precision, ode_steps, memory_budget_gib, require_ac,
-preset}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *, memory_budget_gib, require_ac)`.
+preset, loras}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *, memory_budget_gib,
+require_ac, loras=None)`. `loras` is `((name, scale), …)`; it never changes `build_key`. The real engine resolves
+each name in `models/loras/` (`yue2_studio.lora.find_adapter`) before touching the GPU, then
+`StudioPipeline.set_loras` merges the stack into the AR / NAR weights as they load (a different stack drops the
+resident models first; they reload from the memory-mapped files). Merges show up as `"Merging LoRA into … model"`
+stage events (HTTP `stage="load"`) and the adapters (name, sha256, scale) are recorded in `pipe.weights["loras"]`,
+hence in `result.json` and the request identity.
 
 **Artifact layout written by the engine** (`out_dir` = `data/songs/<job_id>/`):
 
@@ -360,9 +467,10 @@ preset}` produced by `config.resolve_preset(name, precision=None, ode_steps=None
 | `plan/` | right after planning, before semantic generation | `plan.json`, `score.abc` (absent when `cot=off`), `abc_tokens.npy`, `prefix.npy`, `plan_manifest.json` |
 | `song/` | at the end (`SongResult.save_artifacts`, needs an empty dir) | `audio.flac` (48 kHz stereo 24-bit), `result.json` (`status: "complete"`), `score.abc`, `plan.json`, `request.json`, `config.json`, `semantic.npy`, `latent.npy`, `noise.npy`, … |
 | `summary.json` | at the end | the dict returned by `create_song` / `cover_song` |
-| `transcription/` | covers only, before the song stages | `score.abc`, `result.json`, `melody.mid`, `*.lab`, `events.json`, … |
+| `transcription/` | covers and hums, before the song stages | `score.abc`, `result.json`, `melody.mid`, `*.lab`, `events.json`, … |
+| `hum/`, `hum.json` | hums only | `hum.abc` (open score fed to the planner), `carrier.flac` / `carrier_latents.npy` / `prosody.json` (adapter only); `hum.json` receipt (melody, adapter, influence, offset, hashes) |
 | `request.json`, `cover.json` | covers only | resolved request incl. transcribed `abc`; cover receipt |
-| `job.json` | by the worker, at job start | the stored job (id, kind, params, preset/precision/ode_steps, seed, ids, created_at) |
+| `job.json` | by the worker, at job start | the stored job (id, kind, params, preset/precision/ode_steps, loras, seed, ids, created_at) |
 | `audio.mp3` (in `song/`), `artifacts.zip` | lazily by the HTTP routes | cached MP3 transcode; zip of the song dir (excluded from itself) |
 
 The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` → `song/score.abc` (fall back to
@@ -381,6 +489,7 @@ The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` �
             "transcription_seconds": 4.1},
  "truncated": {"abc": false, "semantic": true},
  "identity": "<sha256>", "preset": "fast", "precision": "8bit", "ode_steps": 8, "seed": 12300,
+ "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}],
  "transcription": {"dir": "...", "task": "melody-full", "seconds": 4.1, "source_audio_sha256": "…", "duration_seconds": 16.0}}
 ```
 

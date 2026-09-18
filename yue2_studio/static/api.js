@@ -36,6 +36,9 @@ export const api = {
   remove: (id) => request("DELETE", `/api/jobs/${id}`),
   cancel: (id) => request("POST", `/api/jobs/${id}/cancel`, undefined, { withStatus: true }),
   upload: (file) => { const fd = new FormData(); fd.append("file", file, file.name); return request("POST", "/api/upload", fd); },
+  listUploads: (unused = false) => request("GET", "/api/uploads" + (unused ? "?unused=true" : "")),
+  deleteUpload: (id) => request("DELETE", `/api/uploads/${id}`),
+  pruneUploads: (opts = {}) => request("POST", "/api/uploads/prune", { unused: true, older_than_days: null, ...opts }),
   text: async (path) => {
     const res = await fetch(path);
     if (!res.ok) {

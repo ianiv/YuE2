@@ -22,18 +22,18 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from yue2_studio import config
+from yue2_studio import config, hum, lora
 
 STATUSES = ("queued", "running", "done", "failed", "cancelled")
 TERMINAL = frozenset({"done", "failed", "cancelled"})
-KINDS = ("create", "regenerate", "cover")
-SUBMIT_KINDS = ("create", "regenerate", "cover", "variations")
+KINDS = ("create", "regenerate", "cover", "hum")
+SUBMIT_KINDS = ("create", "regenerate", "cover", "hum", "variations")
 COVER_TASKS = ("melody-full", "melody-vocal", "full")
 COT_MODES = ("full", "melody", "off")
 MAX_SEED = 2**31 - 1
 
 Status = Literal["queued", "running", "done", "failed", "cancelled"]
-Kind = Literal["create", "regenerate", "cover"]
+Kind = Literal["create", "regenerate", "cover", "hum"]
 
 
 def new_id() -> str:
@@ -169,6 +169,66 @@ class CoverParams(_Params):
         return _check_seed(v)
 
 
+class HumParams(_Params):
+    """Hum-to-song: an uploaded/recorded hum, style + lyrics, and the ``yue2_studio.hum.HumOptions``."""
+
+    upload_id: str
+    style: str
+    lyrics: str
+    seed: int | None = None
+    title: str | None = None
+    melody: Literal["continue", "hum_only", "ignore"] = "continue"
+    adapter: str | None = None
+    hum_influence: float = 1.0
+    offset_s: float = 0.0
+
+    @field_validator("style")
+    @classmethod
+    def _style(cls, v):
+        return _non_empty(v, "style")
+
+    @field_validator("lyrics")
+    @classmethod
+    def _lyrics(cls, v):
+        return _non_empty(v, "lyrics")
+
+    @field_validator("seed")
+    @classmethod
+    def _seed(cls, v):
+        return _check_seed(v)
+
+    @field_validator("adapter")
+    @classmethod
+    def _adapter(cls, v):
+        if v is not None and not lora.valid_name(v):
+            raise ValueError("must be an adapter name (letters, digits, . _ -)")
+        return v
+
+    @field_validator("hum_influence")
+    @classmethod
+    def _influence(cls, v):
+        if not hum.MIN_INFLUENCE <= v <= hum.MAX_INFLUENCE:
+            raise ValueError(f"must be in [{hum.MIN_INFLUENCE:g}, {hum.MAX_INFLUENCE:g}]")
+        return v
+
+    @field_validator("offset_s")
+    @classmethod
+    def _offset(cls, v):
+        if not 0 <= v <= hum.MAX_OFFSET_S:
+            raise ValueError(f"must be in [0, {hum.MAX_OFFSET_S:g}]")
+        return v
+
+    def options(self) -> hum.HumOptions:
+        return hum.HumOptions(melody=self.melody, adapter=self.adapter, influence=self.hum_influence,
+                              offset_s=self.offset_s)
+
+    def check(self) -> None:
+        try:
+            self.options()
+        except ValueError as error:
+            raise ValidationFailure(str(error)) from None
+
+
 class VariationsParams(_Params):
     count: int = Field(ge=2, le=16)
     base: CreateParams
@@ -176,12 +236,30 @@ class VariationsParams(_Params):
     label: str | None = None
 
 
+class LoraRef(_Params):
+    name: str
+    scale: float = 1.0
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        if not lora.valid_name(v):
+            raise ValueError("must be an adapter name (letters, digits, . _ -)")
+        return v
+
+    @field_validator("scale")
+    @classmethod
+    def _scale(cls, v):
+        return lora.check_scale(v)
+
+
 class SubmitRequest(_Params):
-    kind: Literal["create", "regenerate", "cover", "variations"]
+    kind: Literal["create", "regenerate", "cover", "hum", "variations"]
     params: dict[str, Any]
     preset: Literal["quality", "fast", "custom"] | None = None
     precision: Literal["bf16", "8bit", "4bit"] | None = None
     ode_steps: int | None = None
+    loras: list[LoraRef] | None = None  # omitted => none (create/cover) or inherited (regenerate)
 
     @field_validator("ode_steps")
     @classmethod
@@ -190,12 +268,37 @@ class SubmitRequest(_Params):
             raise ValueError(f"ode_steps must be in [{config.MIN_ODE_STEPS}, {config.MAX_ODE_STEPS}]")
         return v
 
+    @field_validator("loras")
+    @classmethod
+    def _loras(cls, v):
+        if v is None:
+            return None
+        if len(v) > lora.MAX_STACK:
+            raise ValueError(f"at most {lora.MAX_STACK} adapters")
+        names = [item.name for item in v]
+        if len(set(names)) != len(names):
+            raise ValueError("an adapter is listed twice")
+        return v
+
+    @property
+    def lora_stack(self) -> config.LoraStack | None:
+        return None if self.loras is None else tuple((item.name, item.scale) for item in self.loras)
+
 
 class SettingsModel(_Params):
     default_preset: Literal["quality", "fast", "custom"] = "quality"
     memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB, ge=6, le=44)
     require_ac: bool = config.DEFAULT_REQUIRE_AC
     theme: Literal["system", "light", "dark"] = "system"
+    # Auto-delete uploads no job references after this many days; None = never.
+    prune_uploads_days: int | None = Field(default=None, ge=1, le=365)
+
+    @field_validator("prune_uploads_days", mode="before")
+    @classmethod
+    def _days(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("must be an integer number of days or null")
+        return v
 
 
 DEFAULT_SETTINGS = SettingsModel().model_dump()
@@ -232,6 +335,7 @@ class Job:
     seed: int
     params: dict
     created_at: str
+    loras: config.LoraStack = ()
     group_id: str | None = None
     parent_id: str | None = None
     started_at: str | None = None
@@ -243,7 +347,7 @@ class Job:
     progress: dict | None = None
     seq: int = 0
     artifacts: dict = field(default_factory=lambda: {"audio": False, "score": False, "plan": False,
-                                                     "transcription": False})
+                                                     "transcription": False, "hum": False})
     position: int | None = None
 
     @property
@@ -261,6 +365,7 @@ class Job:
             self.preset, self.precision, self.ode_steps,
             memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
             require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC),
+            loras=self.loras,
         )
 
     def to_api(self) -> dict:
@@ -273,6 +378,7 @@ class Job:
             "preset": self.preset,
             "precision": self.precision,
             "ode_steps": self.ode_steps,
+            "loras": config.loras_to_api(self.loras),
             "seed": self.seed,
             "params": self.params,
             "title": self.title,
@@ -296,6 +402,7 @@ def artifacts_for(song_dir: Path) -> dict:
         "score": (song_dir / "song" / "score.abc").is_file() or (song_dir / "plan" / "score.abc").is_file(),
         "plan": (song_dir / "plan" / "plan.json").is_file(),
         "transcription": (song_dir / "transcription" / "score.abc").is_file(),
+        "hum": (song_dir / "hum" / "hum.abc").is_file(),
     }
 
 
@@ -323,7 +430,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     audio_seconds REAL,
     truncated_json TEXT,
     progress_json TEXT,
-    seq INTEGER NOT NULL
+    seq INTEGER NOT NULL,
+    loras_json TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS jobs_group ON jobs(group_id);
@@ -341,7 +449,10 @@ CREATE TABLE IF NOT EXISTS settings (
 
 _JOB_COLUMNS = ("id", "kind", "status", "group_id", "parent_id", "params_json", "preset", "precision",
                 "ode_steps", "seed", "created_at", "started_at", "finished_at", "error", "timing_json",
-                "audio_seconds", "truncated_json", "progress_json")
+                "audio_seconds", "truncated_json", "progress_json", "loras_json")
+
+# Columns added after the first release: (name, SQL type). Older databases gain them on open.
+_MIGRATIONS = (("loras_json", "TEXT"),)
 
 
 def _loads(text: str | None):
@@ -363,6 +474,10 @@ class JobStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        present = {row["name"] for row in self._conn.execute("PRAGMA table_info(jobs)")}
+        for column, sql_type in _MIGRATIONS:
+            if column not in present:
+                self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {sql_type}")
         self._seq = self._conn.execute("SELECT COALESCE(MAX(seq), 0) FROM jobs").fetchone()[0]
 
     def close(self) -> None:
@@ -379,6 +494,7 @@ class JobStore:
             created_at=row["created_at"], started_at=row["started_at"], finished_at=row["finished_at"],
             error=row["error"], timing=_loads(row["timing_json"]), audio_seconds=row["audio_seconds"],
             truncated=_loads(row["truncated_json"]), progress=_loads(row["progress_json"]), seq=row["seq"],
+            loras=config.normalise_loras(_loads(row["loras_json"])),
         )
         if self.songs_dir is not None:
             job.artifacts = artifacts_for(self.songs_dir / job.id)
@@ -400,15 +516,16 @@ class JobStore:
         job = Job(
             id=job_id or new_id(), kind=kind, status="queued", preset=options.preset,
             precision=options.precision, ode_steps=options.ode_steps, seed=seed, params=params,
-            created_at=now_iso(), group_id=group_id, parent_id=parent_id,
+            created_at=now_iso(), group_id=group_id, parent_id=parent_id, loras=options.loras,
         )
         with self._lock:
             self._seq += 1
             self._conn.execute(
                 "INSERT INTO jobs (id, kind, status, group_id, parent_id, params_json, preset, precision, "
-                "ode_steps, seed, created_at, seq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "ode_steps, seed, created_at, seq, loras_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job.id, job.kind, job.status, job.group_id, job.parent_id, _dumps(job.params), job.preset,
-                 job.precision, job.ode_steps, job.seed, job.created_at, self._seq),
+                 job.precision, job.ode_steps, job.seed, job.created_at, self._seq,
+                 _dumps(config.loras_to_api(job.loras)) if job.loras else None),
             )
         return self.get(job.id)
 
@@ -486,6 +603,23 @@ class JobStore:
         with self._lock:
             rows = self._conn.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
             return {r["status"]: r["n"] for r in rows}
+
+    def upload_counts(self) -> dict[str, dict[str, int]]:
+        """``{upload_id: {"total": n, "active": m}}`` over every cover/hum job (one query); ``active``
+        counts the queued/running ones."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT json_extract(params_json, '$.upload_id') AS upload_id, status, COUNT(*) AS n "
+                "FROM jobs WHERE kind IN ('cover', 'hum') GROUP BY upload_id, status").fetchall()
+        counts: dict[str, dict[str, int]] = {}
+        for r in rows:
+            if not r["upload_id"]:
+                continue
+            entry = counts.setdefault(r["upload_id"], {"total": 0, "active": 0})
+            entry["total"] += r["n"]
+            if r["status"] in ("queued", "running"):
+                entry["active"] += r["n"]
+        return counts
 
     # -- update --------------------------------------------------------------------------------
 
@@ -587,8 +721,9 @@ class Submission:
 
 
 def resolve_options(req: SubmitRequest, settings: dict, *, default_preset: str | None = None,
-                    default_precision: str | None = None,
-                    default_ode_steps: int | None = None) -> config.EngineOptions:
+                    default_precision: str | None = None, default_ode_steps: int | None = None,
+                    default_loras: config.LoraStack = (), lora_lookup=None) -> config.EngineOptions:
+    """Engine options for a submit; ``lora_lookup(name) -> bool`` rejects unknown adapters (400)."""
     preset = req.preset or default_preset or settings.get("default_preset", "quality")
     precision, ode_steps = None, None
     if preset == "custom":
@@ -596,11 +731,16 @@ def resolve_options(req: SubmitRequest, settings: dict, *, default_preset: str |
         ode_steps = req.ode_steps or default_ode_steps
         if precision is None or ode_steps is None:
             raise ValidationFailure("preset=custom requires precision and ode_steps")
+    loras = req.lora_stack if req.lora_stack is not None else default_loras
+    if lora_lookup is not None:
+        unknown = [name for name, _ in loras if not lora_lookup(name)]
+        if unknown:
+            raise ValidationFailure(f"unknown or unusable LoRA adapter {unknown[0]!r}")
     try:
         return config.resolve_preset(
             preset, precision, ode_steps,
             memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
-            require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC),
+            require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC), loras=loras,
         )
     except ValueError as error:
         raise ValidationFailure(str(error)) from None
@@ -617,14 +757,14 @@ def default_group_label(base: CreateParams, count: int) -> str:
 
 
 _PARAM_MODELS = {"create": CreateParams, "regenerate": RegenerateParams, "cover": CoverParams,
-                 "variations": VariationsParams}
+                 "hum": HumParams, "variations": VariationsParams}
 
 
 def validate_submit(body: Any) -> SubmitRequest:
     """Shape-check a ``POST /api/jobs`` body without touching the store (400 before any 503/409)."""
     req = parse(SubmitRequest, body)
     params = parse(_PARAM_MODELS[req.kind], req.params)
-    if isinstance(params, CreateParams):
+    if isinstance(params, CreateParams | HumParams):
         params.check()
     elif isinstance(params, VariationsParams):
         params.base.check()
@@ -633,19 +773,25 @@ def validate_submit(body: Any) -> SubmitRequest:
     return req
 
 
-def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
+def submit(store: JobStore, body: Any, *, upload_lookup=None, lora_lookup=None,
+           hum_adapter_lookup=None) -> Submission:
     """Validate a ``POST /api/jobs`` body and insert the resulting job rows.
 
     ``upload_lookup(upload_id) -> dict | None`` resolves an upload to ``{"filename": str, ...}``;
-    required for covers. Raises ``ValidationFailure`` (400) / ``NotFound`` (404).
+    required for covers and hums. ``lora_lookup(name) -> bool`` says whether an adapter exists and is
+    usable; ``hum_adapter_lookup(name) -> bool`` the same for hum-to-song adapters. Raises
+    ``ValidationFailure`` (400) / ``NotFound`` (404).
     """
     req = validate_submit(body)
     settings = store.get_settings()
 
+    def options_for(**defaults) -> config.EngineOptions:
+        return resolve_options(req, settings, lora_lookup=lora_lookup, **defaults)
+
     if req.kind == "create":
         p = parse(CreateParams, req.params)
         p.check()
-        options = resolve_options(req, settings)
+        options = options_for()
         seed = p.seed if p.seed is not None else random_seed()
         job = store.create(kind="create", params=_create_params_dict(p, seed), options=options, seed=seed)
         return Submission([job])
@@ -653,7 +799,7 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
     if req.kind == "variations":
         v = parse(VariationsParams, req.params)
         v.base.check()
-        options = resolve_options(req, settings)
+        options = options_for()
         start = v.base.seed if v.base.seed is not None else random_seed()
         seeds = ([random_seed() for _ in range(v.count)] if v.random_seeds
                  else [(start + i) % 2**63 for i in range(v.count)])
@@ -672,8 +818,8 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
         cot = pp.get("cot", "full")
         if cot == "off":
             cot = "melody"
-        options = resolve_options(req, settings, default_preset=parent.preset,
-                                  default_precision=parent.precision, default_ode_steps=parent.ode_steps)
+        options = options_for(default_preset=parent.preset, default_precision=parent.precision,
+                              default_ode_steps=parent.ode_steps, default_loras=parent.loras)
         seed = p.seed if p.seed is not None else parent.seed
         params = {
             "style": p.style if p.style is not None and p.style.strip() else pp.get("style", ""),
@@ -692,7 +838,7 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
         upload = upload_lookup(p.upload_id) if upload_lookup is not None else None
         if upload is None:
             raise NotFound(f"upload {p.upload_id!r} not found")
-        options = resolve_options(req, settings)
+        options = options_for()
         seed = p.seed if p.seed is not None else random_seed()
         title = p.title if p.title is not None and p.title.strip() else None
         if title is None:
@@ -702,7 +848,34 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None) -> Submission:
         job = store.create(kind="cover", params=params, options=options, seed=seed)
         return Submission([job])
 
+    if req.kind == "hum":
+        p = parse(HumParams, req.params)
+        p.check()
+        upload = upload_lookup(p.upload_id) if upload_lookup is not None else None
+        if upload is None:
+            raise NotFound(f"upload {p.upload_id!r} not found")
+        if p.adapter is not None and not (hum_adapter_lookup is not None and hum_adapter_lookup(p.adapter)):
+            raise ValidationFailure(f"unknown or unusable hum adapter {p.adapter!r}")
+        options = options_for()
+        seed = p.seed if p.seed is not None else random_seed()
+        title = p.title if p.title is not None and p.title.strip() else None
+        if title is None:
+            title = Path(upload.get("filename", "")).stem or None
+        params = {"upload_id": p.upload_id, "style": p.style, "lyrics": p.lyrics, "seed": seed,
+                  "title": title, "melody": p.melody, "adapter": p.adapter,
+                  "hum_influence": float(p.hum_influence), "offset_s": float(p.offset_s)}
+        job = store.create(kind="hum", params=params, options=options, seed=seed)
+        return Submission([job])
+
     raise ValidationFailure(f"unknown kind {req.kind!r}")  # pragma: no cover
+
+
+def hum_options(job: Job) -> hum.HumOptions:
+    """The stored hum parameters of a ``hum`` job as ``HumOptions``."""
+    p = job.params
+    return hum.HumOptions(melody=p.get("melody", "continue"), adapter=p.get("adapter"),
+                          influence=float(p.get("hum_influence", 1.0)),
+                          offset_s=float(p.get("offset_s", 0.0)))
 
 
 def engine_request(job: Job) -> dict:
@@ -712,6 +885,9 @@ def engine_request(job: Job) -> dict:
                "id": job.id}
     if job.kind == "cover":
         request["cot"] = "full" if p.get("task") == "full" else "melody"
+        return request
+    if job.kind == "hum":
+        request["cot"] = "melody"
         return request
     if p.get("abc"):
         request["abc"] = p["abc"]

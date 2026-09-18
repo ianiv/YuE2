@@ -8,8 +8,10 @@ import io
 import json
 import os
 import stat
+import subprocess
 import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -93,7 +95,9 @@ def test_save_upload_enforces_limit_and_cleans_up(tmp_path):
 
 def test_upload_limit_is_200mb():
     assert audio.UPLOAD_MAX_BYTES == 200 * 1024 * 1024
-    assert audio.UPLOAD_EXTENSIONS == ("mp3", "wav", "flac", "m4a", "ogg")
+    assert audio.UPLOAD_EXTENSIONS == ("mp3", "wav", "flac", "m4a", "ogg", "webm", "mp4")
+    assert audio.validate_upload_name("hum-2026.webm") == "webm"  # MediaRecorder blobs (Chrome / Safari)
+    assert audio.validate_upload_name("hum.MP4") == "mp4"
 
 
 # -- ffmpeg discovery --------------------------------------------------------------------------
@@ -116,6 +120,31 @@ def test_ffmpeg_missing(no_ffmpeg, tmp_path):
         audio.transcode_mp3(flac)
     assert not (tmp_path / "audio.mp3").exists()
     assert audio.probe_duration(flac) is None
+    with pytest.raises(audio.FfmpegMissing):
+        audio.decode_pcm(flac, sample_rate=48000, channels=1)
+
+
+def test_decode_pcm_streams_float32_from_ffmpeg(tmp_path, monkeypatch):
+    """The stub emits 4 little-endian float32 samples (two stereo frames) whatever the input."""
+    import numpy as np
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    samples = "".join(f"\\{b:03o}" for b in np.array([1.0, -2.0, 0.0, 1.0], np.float32).tobytes())
+    _install(bin_dir, "ffmpeg", f"printf '{samples}'", log)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(config, "FFMPEG", None)
+    source = tmp_path / "hum.webm"
+    source.write_bytes(b"x")
+    mono = audio.decode_pcm(source, sample_rate=48000, channels=1)
+    assert mono.dtype == np.float32 and mono.tolist() == [1.0, -2.0, 0.0, 1.0]
+    stereo = audio.decode_pcm(source, sample_rate=48000, channels=2)
+    assert stereo.shape == (2, 2) and stereo[1].tolist() == [0.0, 1.0]
+    args = calls(log)[-1]
+    assert "-ac 2" in args and "-ar 48000" in args and "-f f32le" in args and args.endswith("pipe:1")
+    with pytest.raises(InterruptedError):
+        audio.decode_pcm(source, sample_rate=48000, channels=1, cancelled=lambda: True)
 
 
 # -- transcode ---------------------------------------------------------------------------------
@@ -159,6 +188,14 @@ def test_transcode_mp3_failure_raises_and_cleans_tmp(stubs, tmp_path):
         audio.transcode_mp3(flac)
     assert "ffmpeg failed: boom: bad input" in str(info.value)
     assert not (tmp_path / "audio.mp3").exists() and not list(tmp_path.glob(".*.tmp.mp3"))
+
+
+def test_decode_error_is_readable():
+    error = subprocess.CalledProcessError(183, ["ffmpeg", "-i", "x.mp3"], b"", b"x.mp3: Invalid data found\n")
+    message = str(audio.decode_error(error, Path("/data/uploads/x.mp3")))
+    assert message == "ffmpeg could not decode x.mp3: x.mp3: Invalid data found"
+    assert str(audio.decode_error(subprocess.CalledProcessError(1, ["ffmpeg"]), Path("a.wav"))) \
+        == "ffmpeg could not decode a.wav: exit status 1"
 
 
 def test_probe_duration(stubs, tmp_path):

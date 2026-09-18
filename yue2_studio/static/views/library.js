@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, store, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, store, toast, toastError } from "../ui.js";
 
 /** Index of each job inside its group (API has no group endpoint). Order: the submit response's
  * job order if we remembered it, else Job.seq (submit order), then seed, then created_at. */
@@ -20,7 +20,7 @@ export function groupIndex(jobs) {
 export async function libraryView({ el, query }) {
   const filters = { kind: "", group: query.group || "", preset: "", q: "" };
   const f = {
-    kind: h("select", { id: "l-kind", onchange: (e) => { filters.kind = e.target.value; load(); } }, [["", "All kinds"], ["create", "Create"], ["regenerate", "Regenerate"], ["cover", "Cover"]].map(([v, t]) => h("option", { value: v }, t))),
+    kind: h("select", { id: "l-kind", onchange: (e) => { filters.kind = e.target.value; load(); } }, [["", "All kinds"], ["create", "Create"], ["regenerate", "Regenerate"], ["cover", "Cover"], ["hum", "Hum"]].map(([v, t]) => h("option", { value: v }, t))),
     preset: h("select", { id: "l-preset", onchange: (e) => { filters.preset = e.target.value; paint(); } }, [["", "All presets"], ["quality", "Quality"], ["fast", "Fast"], ["custom", "Custom"]].map(([v, t]) => h("option", { value: v }, t))),
     group: h("select", { id: "l-group", onchange: (e) => { filters.group = e.target.value; load(); } }),
     q: h("input", { id: "l-q", type: "search", placeholder: "Search title, style, lyrics…", oninput: (e) => { filters.q = e.target.value.toLowerCase(); paint(); } }),
@@ -31,6 +31,7 @@ export async function libraryView({ el, query }) {
   const clearAllBtn = h("button", { class: "sm danger", onclick: clearAllFailed }, "Clear all");
   const failedBar = h("div", { class: "row between", hidden: true }, h("span", { class: "hint" }), clearAllBtn);
   const failed = h("details", {}, h("summary", {}, "Failed and cancelled"), failedBar, failedList);
+  const uploadsPanel = uploadsSection();
   const PAGE = 60;
   const more = h("button", { hidden: true, onclick: () => load(true) }, "Load more");
 
@@ -49,7 +50,8 @@ export async function libraryView({ el, query }) {
     h("div", { class: "view-head" }, h("h1", {}, "Library"), count),
     h("div", { class: "row", style: "margin-bottom:14px" }, h("div", { style: "flex:1 1 200px" }, f.q), f.kind, f.preset, f.group, selectBtn),
     selBar,
-    grid, h("div", { class: "row", style: "justify-content:center;margin-top:14px" }, more), h("div", { style: "height:20px" }), failed);
+    grid, h("div", { class: "row", style: "justify-content:center;margin-top:14px" }, more), h("div", { style: "height:20px" }), failed,
+    h("div", { style: "height:20px" }), uploadsPanel.el);
 
   let jobs = [], gidx = {}, total = 0, knownGroups = new Set(), badJobs = [];
   const visibleIds = () => [...el.querySelectorAll("input.sel")].map((i) => i.dataset.id);
@@ -118,6 +120,7 @@ export async function libraryView({ el, query }) {
       if (bad) { badJobs = bad.jobs; paintBad(); }
       paintSelection();
     } catch (e) { toastError(e); }
+    if (!append) uploadsPanel.load();
   }
 
   function paint() {
@@ -138,8 +141,8 @@ export async function libraryView({ el, query }) {
       h("audio", { controls: true, preload: "none", src: songUrl(j.id, "audio.flac") }),
       h("div", { class: "meta" },
         h("span", {}, h("b", { class: "num" }, fmt.dur(j.timing && j.timing.audio_seconds))),
-        h("span", {}, "preset ", h("b", {}, j.preset)), h("span", {}, "seed ", h("b", { class: "num" }, j.seed)),
-        h("span", {}, "mode ", h("b", {}, j.params.cot || j.params.task || "—")), h("span", { title: j.created_at }, fmt.when(j.created_at)),
+        h("span", {}, "preset ", h("b", {}, j.preset)), j.loras && j.loras.length ? h("span", {}, "lora ", h("b", {}, loraLabel(j.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, j.seed)),
+        h("span", {}, "mode ", h("b", {}, modeLabel(j))), h("span", { title: j.created_at }, fmt.when(j.created_at)),
         j.truncated ? h("span", { class: "tag warn", title: j.truncated.reason }, "truncated") : null),
       h("div", { class: "row between" },
         h("div", { class: "row", style: "gap:4px" }, h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.flac"), download: true }, "FLAC"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn ghost sm", href: songUrl(j.id, "artifacts.zip") }, "ZIP")),
@@ -151,7 +154,7 @@ export async function libraryView({ el, query }) {
       h("div", { class: "row between" }, h("div", { class: "row" }, selBox(j), h("span", { class: "title" }, jobTitle(j)), h("span", { class: `tag ${j.status === "failed" ? "err" : ""}` }, j.status), h("span", { class: "tag" }, j.kind)),
         h("button", { class: "ghost sm danger", onclick: () => remove(j) }, "Delete")),
       j.error ? h("div", { class: "errbox mono" }, j.error) : null,
-      h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, j.preset)), h("span", {}, "seed ", h("b", { class: "num" }, j.seed)), h("span", {}, fmt.when(j.finished_at || j.created_at))));
+      h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, j.preset)), j.loras && j.loras.length ? h("span", {}, "lora ", h("b", {}, loraLabel(j.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, j.seed)), h("span", {}, fmt.when(j.finished_at || j.created_at))));
   }
 
   async function remove(j) {
@@ -160,4 +163,79 @@ export async function libraryView({ el, query }) {
   }
   await load();
   return { unmount: () => document.removeEventListener("keydown", onKey) };
+}
+
+/**
+ * Collapsible "Uploads" table (data/uploads/): checkbox multi-select + "Delete selected", and
+ * "Clear unused" (prune everything no job references). Uploads a queued/running job still needs
+ * cannot be selected; finished jobs keep their song without the upload.
+ */
+function uploadsSection() {
+  let uploads = [];
+  const selected = new Set();
+  const list = h("div", { class: "table-wrap" });
+  const info = h("span", { class: "hint" });
+  const deleteBtn = h("button", { class: "sm danger", disabled: true, onclick: deleteSelected }, "Delete selected");
+  const pruneBtn = h("button", { class: "sm", onclick: clearUnused }, "Clear unused");
+  const bar = h("div", { class: "row between", hidden: true }, info, h("div", { class: "row", style: "gap:6px" }, deleteBtn, pruneBtn));
+  const summary = h("summary", {}, "Uploads");
+  const el = h("details", { id: "l-uploads" }, summary, h("p", { class: "hint" }, "Source audio for covers and hums. A finished song keeps playing after its upload is deleted; only queued or running jobs still need theirs."), bar, list);
+  const mb = (n) => (n === null || n === undefined ? "—" : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+  const inUse = (u) => u.jobs.active > 0;
+  const result = (r, verb) => toast(r.failed ? `${r.ok} ${verb}, ${r.failed} failed` : `${r.ok} ${verb}`, r.failed ? "err" : "ok");
+
+  function paintSelection() {
+    for (const id of [...selected]) if (!uploads.some((u) => u.upload_id === id && !inUse(u))) selected.delete(id);
+    list.querySelectorAll("input.usel").forEach((i) => { i.checked = selected.has(i.dataset.id); });
+    deleteBtn.disabled = selected.size === 0;
+    deleteBtn.textContent = selected.size ? `Delete selected (${selected.size})` : "Delete selected";
+    const all = list.querySelector("input.usel-all");
+    if (all) { const free = uploads.filter((u) => !inUse(u)); all.checked = free.length > 0 && free.every((u) => selected.has(u.upload_id)); all.disabled = free.length === 0; }
+  }
+  function row(u) {
+    const busy = inUse(u);
+    const box = h("input", { type: "checkbox", class: "usel", dataset: { id: u.upload_id }, disabled: busy, title: busy ? "In use by a queued or running job" : "", "aria-label": `Select ${u.filename}`, checked: selected.has(u.upload_id),
+      onchange: (e) => { if (e.target.checked) selected.add(u.upload_id); else selected.delete(u.upload_id); paintSelection(); } });
+    return h("tr", { title: busy ? "In use by a queued or running job" : "" },
+      h("td", {}, box),
+      h("td", { style: "overflow-wrap:anywhere" }, h("span", { class: "mono small", title: u.upload_id }, u.filename), u.broken ? [" ", h("span", { class: "tag err", title: "Media file or sidecar is missing" }, "broken")] : null),
+      h("td", { class: "num" }, fmt.dur(u.seconds)), h("td", { class: "num" }, mb(u.size)),
+      h("td", { title: u.created_at }, fmt.when(u.created_at)),
+      h("td", { class: "num" }, u.jobs.total, busy ? [" ", h("span", { class: "tag accent" }, `${u.jobs.active} active`)] : null));
+  }
+  function paint() {
+    const n = uploads.length, bytes = uploads.reduce((a, u) => a + (u.size || 0), 0), unused = uploads.filter((u) => u.jobs.total === 0).length;
+    summary.textContent = `Uploads (${n})`;
+    bar.hidden = n === 0;
+    info.textContent = n ? `${n} upload${n === 1 ? "" : "s"} · ${mb(bytes)} · ${unused} unused` : "";
+    pruneBtn.disabled = unused === 0;
+    fill(list, n ? h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, h("input", { type: "checkbox", class: "usel-all", "aria-label": "Select all deletable uploads", onchange: (e) => { uploads.filter((u) => !inUse(u)).forEach((u) => (e.target.checked ? selected.add(u.upload_id) : selected.delete(u.upload_id))); paintSelection(); } })),
+        h("th", {}, "File"), h("th", { class: "num" }, "Length"), h("th", { class: "num" }, "Size"), h("th", {}, "Uploaded"), h("th", { class: "num" }, "Jobs"))),
+      h("tbody", {}, uploads.map(row))) : h("p", { class: "muted small" }, "None."));
+    paintSelection();
+  }
+  async function load() {
+    try { uploads = (await api.listUploads()).uploads; } catch (e) { toastError(e); uploads = []; }
+    paint();
+  }
+  async function deleteSelected() {
+    const ids = [...selected]; if (!ids.length) return;
+    if (!confirmDialog(`Delete ${ids.length} upload${ids.length === 1 ? "" : "s"}? Finished songs are kept; this cannot be undone.`)) return;
+    deleteBtn.disabled = true; deleteBtn.textContent = "Deleting…";
+    let ok = 0, failed = 0;
+    for (const id of ids) { try { await api.deleteUpload(id); ok++; } catch (e) { failed++; console.warn("delete upload", id, e.message); } }
+    selected.clear();
+    result({ ok, failed }, "deleted");
+    load();
+  }
+  async function clearUnused() {
+    const unused = uploads.filter((u) => u.jobs.total === 0).length; if (!unused) return;
+    if (!confirmDialog(`Delete all ${unused} upload${unused === 1 ? "" : "s"} no job references? This cannot be undone.`)) return;
+    pruneBtn.disabled = true;
+    try { const r = await api.pruneUploads({ unused: true }); toast(`Cleared ${r.deleted} unused upload${r.deleted === 1 ? "" : "s"}${r.skipped ? ` (${r.skipped} still referenced)` : ""}`, "ok"); }
+    catch (e) { toastError(e); }
+    load();
+  }
+  return { el, load };
 }

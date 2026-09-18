@@ -52,7 +52,7 @@ light/dark theme (overridable in Settings).
 | `melody` | Plans only the vocal melody line, then generates audio. |
 | `off` | No score planning; audio is generated straight from style + lyrics. Fastest, loosest. |
 
-Pick a preset (below), a seed (**Random seed** is on by default so the server picks a fresh one
+Pick a preset (below), optionally one or more **LoRA adapters** (see [LoRA adapters](#lora-adapters)), a seed (**Random seed** is on by default so the server picks a fresh one
 per submit — untick it to type or 🎲-roll a fixed seed; *Use this seed* on a result does that for
 you), an optional CFG scale, and
 optionally paste an ABC score to generate from (requires `full` or `melody`). Set **Variations**
@@ -97,7 +97,69 @@ Cover is disabled (and the API answers 409) until the transcription models and f
 `#/settings` and `GET /api/status` say what is missing.
 
 **Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power, theme,
-plus a live engine panel (state, precision, memory, current job, model paths).
+plus a live engine panel (state, precision, memory, merged LoRAs, current job, model paths, the LoRA
+adapters found in `models/loras/` and why any of them is unusable).
+
+### LoRA adapters
+
+Drop adapter files into `models/loras/` (rescanned every 5 s; no restart needed) and pick them in
+the **LoRA adapters** field on Create, Cover and Song (regenerate inherits the parent's stack).
+Each row has a scale (0–4, 1 = as trained) and you can stack several — typically one adapter for
+the **AR** planner and one for the **NAR** acoustic decoder. Two layouts are recognised:
+
+| Layout | Files | Notes |
+|---|---|---|
+| single `.safetensors` (name = file stem) | `layers.N.<block>.<proj>.lora_A` `[r,in]`, `.lora_B` `[out,r]`; optional `vae2llm.*` / `llm2vae.*` full replacements | the layout of the YuE2 LoRAs published on Hugging Face, e.g. [`YuE2-instrumental-cot-full-loras`](https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras) (`ar_lora_inst_v3abc.bf16.safetensors`, AR) and [`yue2-mothersuperior-realaudio-tokenizer-v4`](https://huggingface.co/Mothersuperior/yue2-mothersuperior-realaudio-tokenizer-v4) (`nar_lora_joint_v4.bf16.safetensors`, NAR). The file's `lora_scale` metadata (default 1.0) is honoured. |
+| PEFT directory (name = folder) | `adapter_config.json` + `adapter_model.safetensors` | `base_model.model.<module>.lora_{A,B}.weight`; scale `lora_alpha / r`. |
+
+Supported targets are the AR linears (`self_attn.{q,k,v,o}_proj`, `mlp.{gate,up,down}_proj`,
+`lm_head`) and the NAR linears (`nar_self_attn.*`, `nar_mlp.*`, `llm2vae`, `vae2llm`). Adapters
+are *merged* into the weights when the models load (`W += scale · B @ A`, FP32 opmath; 8-/4-bit AR
+weights are dequantised, merged and requantised), which takes well under a second per adapter and
+costs nothing at generation time. A different stack drops the resident models and merges again on
+the next job. Which adapters (name, sha256, scale) shaped a song is recorded in the job, in
+`summary.json` and in the song's `result.json`.
+
+Files with `hum_proj.*` tensors are [hum-to-song](https://huggingface.co/Mothersuperior/YuE2-hum-to-song)
+adapters: they are listed with kind *hum* and chosen on the **Hum** page (below), not in the LoRA
+stack. Files whose tensors the studio cannot run are listed as *unusable* with the reason.
+
+Tip for the instrumental AR LoRA: use mode `full`, put only *untimed* bare section tags in the
+lyrics field (`[intro]`, `[verse]`, `[chorus]`, … or just `[instrumental]`) and pair it with the NAR
+LoRA; see `examples/instrumental-lora.json`. Timed tags (`[verse 0:15-0:45]`) tend to make this
+adapter overrun to the length cap, and songs land around 3–5 min regardless of the plan; an
+occasional overrun is a known trait of the adapter — re-roll the seed rather than lowering the
+scale. Those weights are CC BY-NC 4.0 like YuE2 itself.
+
+### Hum to song
+
+**Hum** (`#/hum`) — hum a melody for 10–30 seconds (record in the browser — Safari, Chrome and
+Firefox; the page must be on `localhost` or HTTPS for microphone access — or drop a recording),
+add a style and lyrics, and get a whole song built around it. This is the two-stage mechanism from
+[Mothersuperior/YuE2-hum-to-song](https://huggingface.co/Mothersuperior/YuE2-hum-to-song):
+
+1. **Score continuation** (no extra weights). The hum is transcribed with SheetSage2 (melody only),
+   its trailing rests are trimmed and the *open* score is placed in the planner prompt without an
+   end token, so YuE2 keeps writing it: new sections, an ending, all in the hum's key and range —
+   the hummed phrase tends to come back as the hook. **Melody** picks how the hum is used:
+   *Continue my melody* (above), *Hum is the whole melody* (the transcription is the complete vocal
+   line, like a cover) or *Ignore the notes* (the planner writes its own score; only the adapter
+   below uses the hum).
+2. **Prosody adapter** (optional, needs `hum_adapter_v1_combined.safetensors` in `models/loras/`).
+   The hum is reduced to a carrier — its pitch track (`librosa.pyin`) drives a sine whose amplitude
+   follows the hum's envelope — VAE-encoded to 25 Hz latents and added to the acoustic decoder's
+   hidden state at four depths, so the sung line follows *how* you hummed it (timing, phrasing).
+   **Hum influence** is classifier-free guidance on that channel (1 = as trained, 0 = off, above 1
+   exaggerates; ≠ 1 costs about 2× synthesis time); **Hum starts at** places the carrier inside the
+   song. `hum_adapter_v1.safetensors` (the non-combined file) must be stacked on
+   `nar_lora_joint_v4.bf16` — add that one in the LoRA stack; the hum adapter is always merged last.
+
+The transcriber needs something voice-like: a real hum works, a synthesised tone does not (the job
+fails early with "no notes"). Artifacts land in `data/songs/<id>/hum/` (`hum.abc`, `carrier.flac`,
+`carrier_latents.npy`, `prosody.json`) and the song page shows the hum's score next to the continued
+one. Command line: `uv run python scripts/hum_smoke.py --audio my-hum.m4a --adapter
+hum_adapter_v1_combined` (`--analyse-only` just pitch-tracks and encodes the hum). Requires the
+cover prerequisites (`scripts/setup.py --with-cover`, ffmpeg) plus `librosa` (installed by `uv sync`).
 
 ### Presets
 
@@ -158,7 +220,7 @@ under `/api/songs/{id}/` (`audio.flac` with Range support, `audio.mp3`, `score.a
 ## Development
 
 ```bash
-uv run pytest                      # ~225 tests, < 10 s, no models or GPU needed
+uv run pytest                      # ~290 tests, < 15 s, no models or GPU needed (VAE-encoder tests use models/vae when present)
 uv run ruff check .                # lint (E, F, W, I, UP, B; line length 110)
 uv run yue2-studio --fake          # the real server with the fake engine
 uv run python scripts/mock_api.py  # standalone in-memory mock of docs/API.md on :8790 for UI work
@@ -193,10 +255,13 @@ SQLite (data/app.db) for jobs, groups, metadata
 ```
 
 Layout: `yue2_studio/config.py` (paths, presets, sets `MLX_ENABLE_TF32=0` before anything imports
-MLX), `engine.py` (pipeline wrapper; the only module importing `mlx`), `jobs.py` (validation,
-SQLite store), `worker.py` (thread, cancellation, event bus, normalisation), `api.py` (routes),
-`audio.py` (ffmpeg, uploads, zip), `main.py` (app factory + CLI), `static/` (UI),
-`scripts/setup.py` (weights + doctor), `scripts/smoke.py` (one generation through the engine with
+MLX), `engine.py` (pipeline wrapper), `lora.py` (adapter discovery + weight merging), `hum.py`
+(hum options, open-score trimming, carrier analysis), `hum_nar.py` (hum-conditioned acoustic
+sampler, a `CachedNAR` subclass), `vae_encoder.py` (MLX port of the VAE encoder) — the last three
+plus `engine.py` are the only modules importing `mlx` —, `jobs.py` (validation, SQLite store),
+`worker.py` (thread, cancellation, event bus, normalisation), `api.py` (routes), `audio.py`
+(ffmpeg, uploads, zip), `main.py` (app factory + CLI), `static/` (UI), `scripts/setup.py` (weights
++ doctor), `scripts/smoke.py` / `scripts/hum_smoke.py` (one generation through the engine with
 timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md` (contract).
 
 ## Troubleshooting

@@ -29,13 +29,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--memory-budget-gib", type=float, default=config.DEFAULT_MEMORY_BUDGET_GIB)
     parser.add_argument("--require-ac", action="store_true")
+    parser.add_argument("--lora", action="append", default=[], metavar="NAME[:SCALE]",
+                        help="LoRA adapter from models/loras to merge (repeatable), e.g. inst:0.8")
     parser.add_argument("--out", type=Path, help="output directory (default data/songs/smoke-<timestamp>)")
     args = parser.parse_args(argv)
 
     from yue2_studio.engine import Engine
 
+    loras = [(item.partition(":")[0], float(item.partition(":")[2] or 1.0)) for item in args.lora]
     options = config.resolve_preset(args.preset, args.precision, args.ode_steps,
-                                    memory_budget_gib=args.memory_budget_gib, require_ac=args.require_ac)
+                                    memory_budget_gib=args.memory_budget_gib, require_ac=args.require_ac,
+                                    loras=loras)
     request = json.loads(args.example.read_text())
     if args.seed is not None:
         request["seed"] = args.seed

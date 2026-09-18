@@ -1,6 +1,6 @@
 // Shared job cards: a live (queued/running) card driven by SSE, and result cards for terminal jobs.
 import { api, songUrl, subscribe } from "../api.js";
-import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, renderScore, STAGE_NAMES, STAGE_ORDER, toast, toastError } from "../ui.js";
+import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, renderScore, STAGE_NAMES, stagesFor, toast, toastError } from "../ui.js";
 
 const groupTag = (job) => job.group_id ? h("span", { class: "tag accent", title: groupLabel(job.group_id) || "variation group" }, groupLabel(job.group_id) ? fmt.excerpt(groupLabel(job.group_id), 28) : "group") : null;
 
@@ -25,7 +25,7 @@ export function liveCard(job, { onFinish, onGone, scoreCollapsed = false } = {})
     h("div", { class: "row between" },
       h("div", { class: "row" }, h("span", { class: "title" }, jobTitle(job)), status, h("span", { class: "tag" }, job.kind), groupTag(job)),
       cancelBtn),
-    h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, job.preset)), h("span", {}, "seed ", h("b", { class: "num" }, job.seed)), h("span", {}, "mode ", h("b", {}, job.params.cot || job.params.task || "—")),
+    h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, job.preset)), job.loras && job.loras.length ? h("span", { title: loraLabel(job.loras) }, "lora ", h("b", {}, loraLabel(job.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, job.seed)), h("span", {}, "mode ", h("b", {}, modeLabel(job))),
       job.position !== null && job.status === "queued" ? h("span", { class: "pos" }, "position ", h("b", {}, job.position + 1)) : null),
     stageRow, bar, stats, scoreHead, abcBox);
 
@@ -62,11 +62,11 @@ export function liveCard(job, { onFinish, onGone, scoreCollapsed = false } = {})
     status.textContent = job.status === "queued" && !running ? "queued" : "running";
     status.className = "tag " + (running ? "accent" : "");
     const pos = c.el.querySelector(".pos"); if (pos) pos.hidden = !!running;
-    const stages = STAGE_ORDER.filter((s) => s !== "transcribe" || job.kind === "cover");
+    const stages = stagesFor(job.kind, job.params);
     const idx = last && last.stage ? stages.indexOf(last.stage) : -1;
     fill(stageRow, stages.map((s, i) => h("span", { class: i < idx || (i === idx && last.status === "complete") ? "done" : i === idx ? "active" : "" }, STAGE_NAMES[s])));
     const elapsed = c.startedAt ? (Date.now() - c.startedAt) / 1000 : 0;
-    const est = estimate(last, elapsed, job.kind);
+    const est = estimate(last, elapsed, job.kind, job.params);
     bar.classList.toggle("indeterminate", running && !(last && last.total));
     bar.firstChild.style.width = `${Math.round(est.fraction * 100)}%`;
     const parts = [];
@@ -119,8 +119,8 @@ export function resultCard(job, { onUseSeed, onDismiss } = {}) {
     onDismiss ? h("button", { class: "ghost sm", title: "Remove from this list", "aria-label": "Dismiss", onclick: () => onDismiss(job) }, "✕") : null);
   const meta = h("div", { class: "meta" },
     job.status === "done" ? h("span", {}, h("b", { class: "num" }, fmt.dur(t.audio_seconds))) : null,
-    h("span", {}, "preset ", h("b", {}, job.preset)), h("span", {}, "seed ", h("b", { class: "num" }, job.seed)),
-    h("span", {}, "mode ", h("b", {}, job.params.cot || job.params.task || "—")),
+    h("span", {}, "preset ", h("b", {}, job.preset)), job.loras && job.loras.length ? h("span", { title: loraLabel(job.loras) }, "lora ", h("b", {}, loraLabel(job.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, job.seed)),
+    h("span", {}, "mode ", h("b", {}, modeLabel(job))),
     h("span", { title: job.finished_at || job.created_at }, fmt.when(job.finished_at || job.created_at)),
     job.truncated ? h("span", { class: "tag warn", title: job.truncated.reason }, "truncated") : null);
   if (job.status !== "done") {

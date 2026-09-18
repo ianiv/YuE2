@@ -25,7 +25,10 @@ def probe(body: str) -> dict:
     return json.loads(out)
 
 
-@pytest.mark.parametrize("module", ["config", "jobs", "worker", "audio", "fake", "api", "main"])
+HTTP_SIDE_MODULES = ("config", "jobs", "worker", "audio", "fake", "api", "main", "lora", "hum")
+
+
+@pytest.mark.parametrize("module", HTTP_SIDE_MODULES)
 def test_importing_http_side_modules_never_loads_mlx(module):
     result = probe(f"import yue2_studio.{module}")
     assert result == {"loaded": [], "tf32": "0"}
@@ -57,3 +60,18 @@ src = open(m.__file__).read()
 assert "from yue2_studio.engine import Engine" in src  # lazy import inside _real_engine
 """
     assert probe(body)["loaded"] == []
+
+
+def test_fake_hum_job_never_imports_mlx(tmp_path):
+    body = """
+from pathlib import Path
+from yue2_studio import config
+from yue2_studio.fake import FakeEngine
+from yue2_studio.hum import HumOptions
+home = Path(HOME)
+hum = home / "hum.webm"; hum.write_bytes(b"x")
+summary = FakeEngine(delay=0).hum_song(hum, home / "song", request={"style": "s", "lyrics": "l", "seed": 1},
+                                      hum=HumOptions(adapter="hum_v1"), options=config.resolve_preset("fast"))
+assert summary["status"] == "complete" and summary["hum"]["adapter"] == "hum_v1"
+"""
+    assert probe(body.replace("HOME", repr(str(tmp_path)))) == {"loaded": [], "tf32": "0"}

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from yue2_studio import config
 
-UPLOAD_EXTENSIONS = ("mp3", "wav", "flac", "m4a", "ogg")
+UPLOAD_EXTENSIONS = ("mp3", "wav", "flac", "m4a", "ogg", "webm", "mp4")  # webm/mp4: MediaRecorder blobs
 UPLOAD_MAX_BYTES = 200 * 1024 * 1024
 ZIP_EXCLUDE = {"artifacts.zip"}
 
@@ -76,6 +76,54 @@ def transcode_mp3(flac_path: Path, mp3_path: Path | None = None, *, bitrate: str
             tmp.unlink(missing_ok=True)
             raise
     return mp3_path
+
+
+def decode_pcm(path: Path, *, sample_rate: int, channels: int, cancelled=None, timeout: float = 600):
+    """Decode any ffmpeg-readable file to float32 PCM: ``[S]`` (mono) or ``[S, channels]``.
+
+    ``cancelled()`` is polled every 0.2 s; a cancellation kills ffmpeg and raises ``InterruptedError``.
+    """
+    import numpy as np
+
+    ffmpeg = ffmpeg_path()
+    if ffmpeg is None:
+        raise FfmpegMissing("ffmpeg is not installed")
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", str(path), "-vn", "-ac", str(channels),
+           "-ar", str(sample_rate), "-f", "f32le", "pipe:1"]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    chunks: list[bytes] = []
+    try:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancelled is not None and cancelled():
+                process.kill()
+                raise InterruptedError("Cancelled while decoding audio")
+            if time.monotonic() > deadline:
+                process.kill()
+                raise RuntimeError("ffmpeg timed out while decoding audio")
+            try:
+                out, err = process.communicate(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                continue
+            chunks.append(out)
+            break
+    finally:
+        if process.poll() is None:
+            process.kill()
+    if process.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {err.decode(errors='replace').strip()[:500]}")
+    data = np.frombuffer(b"".join(chunks), dtype=np.float32)
+    return data if channels == 1 else data.reshape(-1, channels)
+
+
+def decode_error(error: subprocess.CalledProcessError, path: Path) -> ValueError:
+    """Turn ffmpeg's ``CalledProcessError`` (exit status only) into a readable ``ValueError``."""
+    stderr = error.stderr or b""
+    detail = (stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr).strip()[-500:]
+    detail = detail or f"exit status {error.returncode}"
+    return ValueError(f"ffmpeg could not decode {Path(path).name}: {detail}")
 
 
 def probe_duration(path: Path) -> float | None:

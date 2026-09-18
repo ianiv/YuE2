@@ -186,3 +186,9 @@ pre.lyrics-block { white-space: pre-wrap; overflow-wrap: anywhere; font-family: 
 
 input:disabled, button:disabled { opacity: .55; }
 .check.small { font-size: 12px; color: var(--muted); }
+
+/* hum recorder */
+.meter { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.meter > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .08s linear; }
+button.recording { background: var(--err); border-color: var(--err); color: #fff; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }

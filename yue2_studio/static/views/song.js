@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, jobTitle, loraLabel, loraPicker, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, toast, toastError } from "../ui.js";
 
 export async function songView({ el, param, app }) {
   let job;
@@ -7,9 +7,10 @@ export async function songView({ el, param, app }) {
   catch (e) { fill(el, h("div", { class: "empty" }, e.status === 404 ? "This song does not exist (it may have been deleted)." : e.message, " ", h("a", { href: "#/library" }, "Back to library"))); return {}; }
   if (job.status === "queued" || job.status === "running") { fill(el, h("div", { class: "empty" }, "This job is still ", job.status, ". ", h("a", { href: "#/queue" }, "Watch it in the queue"))); return {}; }
   const p = job.params, t = job.timing || {};
-  const [abc, transcription] = await Promise.all([
+  const [abc, transcription, humAbc] = await Promise.all([
     job.artifacts.score ? api.text(songUrl(job.id, "score.abc")).catch(() => "") : "",
     job.kind === "cover" && job.artifacts.transcription ? api.text(songUrl(job.id, "transcription/score.abc")).catch(() => "") : "",
+    job.kind === "hum" && job.artifacts.hum ? api.text(songUrl(job.id, "hum/hum.abc")).catch(() => "") : "",
   ]);
 
   // Score editor + regenerate
@@ -23,6 +24,7 @@ export async function songView({ el, param, app }) {
   // Regenerate inherits the parent's seed when blank; the toggle (off by default) opts into a fresh random one.
   const seedIn = seedField({ id: "s-seed", seed: job.seed, random: false, randomLabel: "Random seed (instead of inheriting)" });
   const presets = presetPicker({ preset: job.preset, precision: job.precision, ode_steps: job.ode_steps }, app.status && app.status.presets);
+  const loras = loraPicker(job.loras || [], app.status && app.status.loras ? app.status.loras.adapters : []);
   const regenBtn = h("button", { class: "primary", onclick: regenerate }, "Regenerate from this score");
   const countIn = h("input", { id: "s-count", type: "number", min: 2, max: 16, value: 3, style: "width:70px" });
   const varBtn = h("button", { onclick: variations, disabled: job.kind === "cover" && !transcription, title: job.kind === "cover" ? "Variations of a cover reuse its transcription" : "" }, "More variations");
@@ -35,7 +37,7 @@ export async function songView({ el, param, app }) {
     try {
       // RegenerateParams: seed null = inherit parent, so a random seed must be rolled client-side.
       const style = styleIn.value.trim(), seed = seedIn.isRandom() ? randomSeed() : seedIn.value();
-      await api.submit({ kind: "regenerate", ...presets.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
+      await api.submit({ kind: "regenerate", ...presets.value(), loras: loras.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
       toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = "#/queue";
     } catch (e) { toastError(e); regenBtn.disabled = false; }
   }
@@ -46,8 +48,10 @@ export async function songView({ el, param, app }) {
       // Covers: seed the variations from the transcription so the melody is kept (cot melody, as the cover flow does).
       const base = job.kind === "cover"
         ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: null, abc: transcription, title: p.title || null }
-        : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
-      const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, params: { count, base, random_seeds: false, label: null } });
+        : job.kind === "hum"
+          ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: null, abc: abc || null, title: p.title || null } // variations keep the continued score
+          : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
+      const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: loras.value(), params: { count, base, random_seeds: false, label: null } });
       rememberGroup(r.group, r.jobs);
       toast(`Queued ${count} variations`, "ok"); location.hash = "#/queue";
     } catch (e) { toastError(e); varBtn.disabled = false; }
@@ -57,7 +61,7 @@ export async function songView({ el, param, app }) {
     try { await api.remove(job.id); toast("Deleted", "ok"); location.hash = "#/library"; } catch (e) { toastError(e); }
   }
 
-  const stageKeys = ["load", "transcribe", "plan", "semantic", "synthesize", "decode", "save", "e2e"].filter((k) => t[k] !== undefined && t[k] !== null);
+  const stageKeys = ["load", "transcribe", "hum", "plan", "semantic", "synthesize", "decode", "save", "e2e"].filter((k) => t[k] !== undefined && t[k] !== null);
   const timingTable = stageKeys.length ? h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", {}, "Stage"), h("th", { class: "num" }, "Seconds"), h("th", { class: "num" }, "Share"))),
     h("tbody", {}, stageKeys.map((k) => h("tr", { style: k === "e2e" ? "font-weight:600" : "" }, h("td", {}, STAGE_NAMES[k] || k), h("td", { class: "num" }, Number(t[k]).toFixed(1)), h("td", { class: "num" }, k === "e2e" || !t.e2e ? "" : `${Math.round(100 * t[k] / t.e2e)}%`)))))) : h("p", { class: "muted small" }, "No timing recorded.");
@@ -80,20 +84,24 @@ export async function songView({ el, param, app }) {
         h("section", { class: "panel stack" }, h("h3", {}, "Request"),
           h("p", {}, h("span", { class: "muted small", style: "text-transform:uppercase;letter-spacing:.05em" }, "Style "), p.style || "—"),
           h("pre", { class: "block lyrics-block", "aria-label": "Lyrics" }, p.lyrics || "—")),
-        h("section", { class: "stack" }, h("h3", {}, "Score"),
+        h("section", { class: "stack" }, h("h3", {}, job.kind === "hum" ? (p.melody === "hum_only" ? "Score (from your hum)" : p.melody === "continue" ? "Continued score" : "Score") : "Score"),
           abc ? [scoreEl, h("div", { class: "row" }, player, h("span", { class: "hint" }, "Edit the ABC below; the score re-renders as you type.")), abcArea]
             : h("p", { class: "muted" }, "No score for this song (mode off or planning did not finish)."),
           h("div", { class: "panel stack" },
             h("label", { class: "field" }, h("span", { class: "lbl" }, "Style (optional edit)"), styleIn),
             h("div", { class: "grid2 stack-narrow" }, h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), seedIn), h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets)),
+            h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
             h("div", { class: "row" }, regenBtn, h("span", { class: "spacer" }), h("label", { class: "row", style: "gap:6px" }, countIn, varBtn)),
             h("p", { class: "hint" }, "Regenerate keeps the lyrics and mode; variations start from a fresh random seed. ", h("a", { href: `#/create?from=${job.id}` }, "Open in Create")))),
-        transcription ? h("section", { class: "stack" }, h("h3", {}, "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null),
+        transcription ? h("section", { class: "stack" }, h("h3", {}, "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null,
+        humAbc ? h("section", { class: "stack" }, h("h3", {}, p.melody === "continue" ? "Your hum (the open score the planner continued)" : "Your hum (transcribed)"), (() => { const s = h("div", { class: "score" }); renderScore(s, humAbc); return s; })(), h("details", {}, h("summary", {}, "hum/hum.abc"), h("pre", { class: "block mono" }, humAbc))) : null),
       h("div", { class: "stack" },
         h("div", { class: "panel stack" }, h("h3", {}, "Details"),
           h("dl", { class: "kv" },
-            h("dt", {}, job.kind === "cover" ? "Task" : "Mode"), h("dd", {}, p.task || p.cot || "—"),
+            h("dt", {}, job.kind === "cover" ? "Task" : job.kind === "hum" ? "Melody" : "Mode"), h("dd", {}, job.kind === "hum" ? (p.melody || "continue").replace("_", " ") : (p.task || p.cot || "—")),
+            job.kind === "hum" ? [h("dt", {}, "Hum adapter"), h("dd", {}, p.adapter ? `${p.adapter} · influence ${p.hum_influence} · from ${p.offset_s}s` : "none (score only)")] : null,
             h("dt", {}, "Preset"), h("dd", {}, `${job.preset} · ${job.precision} · ${job.ode_steps} steps`),
+            job.loras && job.loras.length ? [h("dt", {}, "LoRA"), h("dd", {}, loraLabel(job.loras))] : null,
             h("dt", {}, "Seed"), h("dd", {}, job.seed), p.cfg_scale != null ? [h("dt", {}, "CFG"), h("dd", {}, p.cfg_scale)] : null,
             h("dt", {}, "Audio"), h("dd", {}, fmt.dur(t.audio_seconds)),
             h("dt", {}, "Created"), h("dd", { title: job.created_at }, fmt.when(job.created_at)), h("dt", {}, "Job"), h("dd", { class: "mono" }, job.id))),

@@ -8,6 +8,7 @@ import io
 import json
 import shutil
 import zipfile
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import BASE, Api
@@ -16,9 +17,9 @@ from yue2_studio import api as api_module
 from yue2_studio import audio
 from yue2_studio.fake import FakeEngine
 
-JOB_KEYS = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps", "seed",
-            "params", "title", "created_at", "started_at", "finished_at", "error", "timing", "truncated",
-            "progress", "artifacts", "position", "seq"}
+JOB_KEYS = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps", "loras",
+            "seed", "params", "title", "created_at", "started_at", "finished_at", "error", "timing",
+            "truncated", "progress", "artifacts", "position", "seq"}
 EVENT_KEYS = {"type", "job_id", "ts", "stage", "label", "completed", "total", "unit", "status", "phase",
               "tokens", "tps", "seconds", "text", "partial", "message"}
 
@@ -31,7 +32,7 @@ class ColdEngine:
     def ensure(self, options, on_event=None):
         raise RuntimeError("no models in tests")
 
-    create_song = cover_song = ensure
+    create_song = cover_song = hum_song = ensure
 
     def memory_footprint(self):
         return {}
@@ -54,12 +55,16 @@ def fake_models(home):
 # -- status / settings ------------------------------------------------------------------------
 
 
-async def test_status_shape(client):
+async def test_status_shape(client, home):
     r = await client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"engine", "queue", "presets", "models", "cover", "ffmpeg", "fake", "version"}
-    assert body["engine"] == {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None}
+    assert set(body) == {"engine", "queue", "presets", "models", "cover", "hum", "loras", "ffmpeg", "fake",
+                         "version"}
+    assert body["hum"] == {"available": True, "reasons": [], "adapters": []}
+    assert body["engine"] == {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None,
+                              "loras": []}
+    assert body["loras"] == {"dir": str(home / "models" / "loras"), "adapters": []}
     assert body["queue"] == {"queued": 0, "running": None}
     assert [p["name"] for p in body["presets"]] == ["quality", "fast", "custom"]
     assert body["presets"][0]["precision"] == "bf16" and body["presets"][0]["ode_steps"] == 32
@@ -90,11 +95,11 @@ async def test_status_reflects_queue_and_engine(client, api, app):
 async def test_settings_get_and_partial_put(client):
     r = await client.get("/api/settings")
     assert r.json() == {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                        "theme": "system"}
+                        "theme": "system", "prune_uploads_days": None}
     r = await client.put("/api/settings", json={"theme": "dark"})
     assert r.status_code == 200
     assert r.json() == {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                        "theme": "dark"}
+                        "theme": "dark", "prune_uploads_days": None}
     assert (await client.get("/api/settings")).json()["theme"] == "dark"  # persisted
     r = await client.put("/api/settings", json={"bogus": 1})  # unknown keys ignored
     assert r.status_code == 200 and "bogus" not in r.json()
@@ -112,6 +117,11 @@ async def test_settings_get_and_partial_put(client):
     ({"default_preset": "fast"}, True), ({"default_preset": "ultra"}, False),
     ({"require_ac": True}, True), ({"require_ac": 3}, False),
     ({"theme": "light"}, True), ({"theme": "neon"}, False),
+    ({"prune_uploads_days": 1}, True), ({"prune_uploads_days": 365}, True),
+    ({"prune_uploads_days": None}, True),
+    ({"prune_uploads_days": 0}, False), ({"prune_uploads_days": 366}, False),
+    ({"prune_uploads_days": "week"}, False),
+    ({"prune_uploads_days": True}, False),
 ])
 async def test_settings_validation_bounds(client, patch, ok):
     before = (await client.get("/api/settings")).json()
@@ -644,6 +654,31 @@ async def test_upload_accepted_extensions(client, name):
     assert "/" not in r.json()["filename"]
 
 
+async def test_upload_rejects_empty_file(client, app):
+    r = await client.post("/api/upload", files={"file": ("cloud.mp3", b"", "audio/mpeg")})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+    assert "empty (0 bytes)" in r.json()["error"]["message"]
+    assert not any(app.state.paths.uploads_dir.iterdir())  # no file, no sidecar
+
+
+async def test_upload_rejects_unreadable_audio_when_ffprobe_present(client, app, monkeypatch):
+    monkeypatch.setattr(audio, "ffprobe_path", lambda: "/stub/ffprobe")
+    monkeypatch.setattr(audio, "probe_duration", lambda path: None)
+    r = await client.post("/api/upload", files={"file": ("bad.wav", b"\0" * 16, "audio/wav")})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+    assert "could not read the uploaded audio" in r.json()["error"]["message"]
+    assert not any(app.state.paths.uploads_dir.iterdir())
+
+
+async def test_upload_without_ffprobe_keeps_unknown_duration(client, app, monkeypatch):
+    monkeypatch.setattr(audio, "ffprobe_path", lambda: None)
+    monkeypatch.setattr(audio, "probe_duration", lambda path: None)
+    r = await client.post("/api/upload", files={"file": ("x.wav", b"\0" * 16, "audio/wav")})
+    assert r.status_code == 201, r.text
+    assert r.json()["seconds"] is None
+    assert (app.state.paths.uploads_dir / f"{r.json()['upload_id']}.wav").is_file()
+
+
 async def test_upload_too_large(client, monkeypatch):
     monkeypatch.setattr(audio, "UPLOAD_MAX_BYTES", 1024)
     r = await client.post("/api/upload", files={"file": ("big.wav", b"\0" * 4096, "audio/wav")})
@@ -665,6 +700,187 @@ async def test_upload_id_lookup_rejects_odd_ids(client, api):
     assert job["title"] == "x"
 
 
+# -- uploads management ---------------------------------------------------------------------------
+
+
+async def _upload(client, name: str, payload: bytes = b"\0" * 32) -> dict:
+    r = await client.post("/api/upload", files={"file": (name, payload, "application/octet-stream")})
+    assert r.status_code == 201, r.text
+    await asyncio.sleep(0.002)  # created_at has millisecond resolution: keep the order unambiguous
+    return r.json()
+
+
+def _backdate(app, upload_id: str, days: int) -> None:
+    sidecar = app.state.paths.uploads_dir / f"{upload_id}.json"
+    info = json.loads(sidecar.read_text())
+    stamp = datetime.now(UTC) - timedelta(days=days)
+    info["created_at"] = stamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sidecar.write_text(json.dumps(info))
+
+
+async def test_list_uploads_newest_first_with_counts_and_unused_filter(client, api, app):
+    assert (await client.get("/api/uploads")).json() == {"uploads": []}
+    a = await _upload(client, "first.wav", b"\0" * 100)
+    b = await _upload(client, "second.mp3")
+    c = await _upload(client, "third.m4a")
+    cover = {"kind": "cover", "params": {"upload_id": b["upload_id"], "style": "s", "lyrics": "l"}}
+    for _ in range(2):
+        await api.wait((await api.submit(cover))["job"]["id"])
+    app.state.engine.delay = 0.05
+    blocker = await api.create()
+    hum = (await api.submit({"kind": "hum", "params": {"upload_id": b["upload_id"], "style": "s",
+                                                       "lyrics": "l"}}))["job"]
+    ups = (await client.get("/api/uploads")).json()["uploads"]
+    assert [u["upload_id"] for u in ups] == [c["upload_id"], b["upload_id"], a["upload_id"]]
+    assert set(ups[0]) == {"upload_id", "filename", "ext", "seconds", "size", "created_at", "broken", "jobs"}
+    assert ups[2] == {"upload_id": a["upload_id"], "filename": "first.wav", "ext": "wav", "seconds": 12.3,
+                      "size": 100, "created_at": ups[2]["created_at"], "broken": False,
+                      "jobs": {"total": 0, "active": 0}}
+    assert ups[1]["jobs"] == {"total": 3, "active": 1} and ups[1]["ext"] == "mp3"
+    unused = (await client.get("/api/uploads", params={"unused": "true"})).json()["uploads"]
+    assert [u["upload_id"] for u in unused] == [c["upload_id"], a["upload_id"]]
+    await client.post(f"/api/jobs/{blocker['id']}/cancel")
+    await api.wait(hum["id"])
+    assert (await client.get("/api/uploads")).json()["uploads"][1]["jobs"] == {"total": 3, "active": 0}
+
+
+async def test_delete_upload_204_404_409(client, api, app):
+    up = await _upload(client, "song.wav")
+    paths = app.state.paths
+    app.state.engine.delay = 0.05
+    blocker = await api.create()
+    job = (await api.submit({"kind": "cover", "params": {"upload_id": up["upload_id"], "style": "s",
+                                                         "lyrics": "l"}}))["job"]
+    r = await client.delete(f"/api/uploads/{up['upload_id']}")  # referenced by a queued job
+    assert r.status_code == 409 and r.json()["error"]["code"] == "in_use"
+    assert (paths.uploads_dir / f"{up['upload_id']}.wav").is_file()
+    await client.post(f"/api/jobs/{blocker['id']}/cancel")
+    assert (await api.wait(job["id"]))["status"] == "done"
+    r = await client.delete(f"/api/uploads/{up['upload_id']}")  # finished jobs do not pin it
+    assert r.status_code == 204 and r.content == b""
+    assert not any(paths.uploads_dir.iterdir())
+    assert (await client.delete(f"/api/uploads/{up['upload_id']}")).status_code == 404
+    for bad in ("nope", "a..b", "a.b", "x%20y"):
+        r = await client.delete(f"/api/uploads/{bad}")
+        assert r.status_code == 404, bad
+    # the job row survives and still serves its artifacts
+    assert (await client.get(f"/api/songs/{job['id']}/audio.flac")).status_code == 200
+
+
+async def test_prune_uploads_counts_and_skips_in_use(client, api, app):
+    old_free = await _upload(client, "old-free.wav")
+    old_used = await _upload(client, "old-used.wav")
+    new_free = await _upload(client, "new-free.wav")
+    active = await _upload(client, "active.wav")
+    _backdate(app, old_free["upload_id"], 10)
+    _backdate(app, old_used["upload_id"], 10)
+    cover = {"kind": "cover", "params": {"upload_id": old_used["upload_id"], "style": "s", "lyrics": "l"}}
+    await api.wait((await api.submit(cover))["job"]["id"])
+    app.state.engine.delay = 0.05
+    blocker = await api.create()
+    hum = (await api.submit({"kind": "hum", "params": {"upload_id": active["upload_id"], "style": "s",
+                                                       "lyrics": "l"}}))["job"]
+    r = await client.post("/api/uploads/prune", json={"unused": True, "older_than_days": 7})
+    assert r.status_code == 200 and r.json() == {"deleted": 1, "skipped": 1}
+    left = {u["upload_id"] for u in (await client.get("/api/uploads")).json()["uploads"]}
+    assert left == {old_used["upload_id"], new_free["upload_id"], active["upload_id"]}
+    r = await client.post("/api/uploads/prune", json={"unused": True, "older_than_days": None})
+    assert r.json() == {"deleted": 1, "skipped": 2}  # new-free went; the referenced two stay
+    r = await client.post("/api/uploads/prune", json={"unused": False})  # everything without an active job
+    assert r.json() == {"deleted": 1, "skipped": 1}
+    left = {u["upload_id"] for u in (await client.get("/api/uploads")).json()["uploads"]}
+    assert left == {active["upload_id"]}
+    for bad in ({"unused": "yes"}, {"older_than_days": 0}, {"older_than_days": "7"},
+                {"older_than_days": True}, [1]):
+        r = await client.post("/api/uploads/prune", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
+    await client.post(f"/api/jobs/{blocker['id']}/cancel")
+    await api.wait(hum["id"])
+    assert (await client.post("/api/uploads/prune", json={})).json() == {"deleted": 0, "skipped": 1}
+
+
+async def test_broken_uploads_are_listed_and_deletable(client, app):
+    paths = app.state.paths
+    no_media = await _upload(client, "gone.wav")
+    (paths.uploads_dir / f"{no_media['upload_id']}.wav").unlink()
+    no_sidecar = await _upload(client, "orphan.mp3")
+    (paths.uploads_dir / f"{no_sidecar['upload_id']}.json").unlink()
+    bad_json = await _upload(client, "garbled.ogg")
+    (paths.uploads_dir / f"{bad_json['upload_id']}.json").write_text("{not json")
+    (paths.uploads_dir / ".DS_Store").write_bytes(b"junk")  # never an upload
+    ok = await _upload(client, "fine.flac")
+    by_id = {u["upload_id"]: u for u in (await client.get("/api/uploads")).json()["uploads"]}
+    assert set(by_id) == {no_media["upload_id"], no_sidecar["upload_id"], bad_json["upload_id"],
+                          ok["upload_id"]}
+    assert by_id[ok["upload_id"]]["broken"] is False and by_id[ok["upload_id"]]["size"] == 32
+    assert by_id[no_media["upload_id"]]["broken"] is True and by_id[no_media["upload_id"]]["size"] is None
+    assert by_id[no_media["upload_id"]]["filename"] == "gone.wav"
+    orphan = by_id[no_sidecar["upload_id"]]
+    assert orphan["broken"] is True and orphan["size"] is None and orphan["ext"] == "mp3"
+    assert orphan["filename"] == f"{no_sidecar['upload_id']}.mp3" and orphan["created_at"].endswith("Z")
+    assert by_id[bad_json["upload_id"]]["broken"] is True
+    # broken uploads cannot be submitted, but can be deleted (both pieces go)
+    r = await client.post("/api/jobs", json={"kind": "cover", "params": {"upload_id": no_sidecar["upload_id"],
+                                                                          "style": "s", "lyrics": "l"}})
+    assert r.status_code == 404
+    for uid in (no_media["upload_id"], no_sidecar["upload_id"], bad_json["upload_id"]):
+        assert (await client.delete(f"/api/uploads/{uid}")).status_code == 204
+    assert sorted(p.name for p in paths.uploads_dir.iterdir()) == sorted(
+        [".DS_Store", f"{ok['upload_id']}.flac", f"{ok['upload_id']}.json"])
+    r = await client.post("/api/uploads/prune", json={"unused": True})
+    assert r.json() == {"deleted": 1, "skipped": 0}
+
+
+async def test_glob_metacharacters_in_upload_names_never_match_other_files(client, app):
+    """``valid_id`` admits ``*``: a stray ``*.wav`` is its own entry and deleting it touches nothing else."""
+    paths = app.state.paths
+    keep = await _upload(client, "keep.wav")
+    (paths.uploads_dir / "*.wav").write_bytes(b"\0" * 8)
+    (paths.uploads_dir / "[ab].mp3").write_bytes(b"\0" * 8)
+    by_id = {u["upload_id"]: u for u in (await client.get("/api/uploads")).json()["uploads"]}
+    assert set(by_id) == {keep["upload_id"], "*", "[ab]"}
+    assert by_id["*"]["broken"] is True and by_id["*"]["filename"] == "*.wav"
+    # the worker resolves the media file by exact stem too
+    assert app.state.worker._upload_path("*").name == "*.wav"
+    assert app.state.worker._upload_path(keep["upload_id"]).name == f"{keep['upload_id']}.wav"
+    assert (await client.delete("/api/uploads/*")).status_code == 204
+    assert sorted(p.name for p in paths.uploads_dir.iterdir()) == sorted(
+        ["[ab].mp3", f"{keep['upload_id']}.wav", f"{keep['upload_id']}.json"])
+    r = await client.post("/api/uploads/prune", json={"unused": True})  # prunes [ab] and keep, one file each
+    assert r.json() == {"deleted": 2, "skipped": 0} and not any(paths.uploads_dir.iterdir())
+
+
+async def test_auto_prune_setting_runs_after_jobs_and_at_startup(make_app, home, api):
+    async with make_app(FakeEngine(delay=0), home=home) as (app, client):
+        api = Api(client)
+        await client.put("/api/settings", json={"prune_uploads_days": 2})
+        stale = await _upload(client, "stale.wav")
+        fresh = await _upload(client, "fresh.wav")
+        pinned = await _upload(client, "pinned.wav")
+        _backdate(app, stale["upload_id"], 3)
+        _backdate(app, pinned["upload_id"], 3)
+        app.state.engine.delay = 0.05
+        blocker = await api.create()
+        hum = (await api.submit({"kind": "hum", "params": {"upload_id": pinned["upload_id"], "style": "s",
+                                                           "lyrics": "l"}}))["job"]
+        assert len((await client.get("/api/uploads")).json()["uploads"]) == 3  # nothing finished yet
+        await client.post(f"/api/jobs/{blocker['id']}/cancel")
+        await api.wait(hum["id"])
+        await asyncio.sleep(0.05)  # the hook runs on the worker thread right after ``done``
+        left = {u["upload_id"] for u in (await client.get("/api/uploads")).json()["uploads"]}
+        assert left == {fresh["upload_id"], pinned["upload_id"]}  # stale pruned; pinned is referenced
+        # a job that finishes with the setting off prunes nothing
+        await client.put("/api/settings", json={"prune_uploads_days": None})
+        _backdate(app, fresh["upload_id"], 3)
+        await api.wait((await api.create())["id"])
+        await asyncio.sleep(0.05)
+        assert len((await client.get("/api/uploads")).json()["uploads"]) == 2
+        await client.put("/api/settings", json={"prune_uploads_days": 1})
+    async with make_app(FakeEngine(delay=0), home=home) as (app, client):  # startup applies the setting
+        left = {u["upload_id"] for u in (await client.get("/api/uploads")).json()["uploads"]}
+        assert left == {pinned["upload_id"]}
+
+
 # -- availability: real model paths, no models --------------------------------------------------
 
 
@@ -683,6 +899,87 @@ async def test_models_missing_gives_503_with_real_paths(make_app, home):
         r = await c.post("/api/jobs", json={"kind": "create", "params": {"style": ""}})
         assert r.status_code == 400  # malformed bodies are 400 even when models are missing
         assert (await c.get("/api/jobs")).json()["total"] == 0
+
+
+async def test_hum_submit_streams_and_serves_artifacts(client, api, app, home):
+    from test_lora import hum_tensors, nar_tensors, write_safetensors
+
+    loras_dir = home / "models" / "loras"
+    write_safetensors(loras_dir / "hum_v1.safetensors", hum_tensors(), {"inject_layers": "[0, 1]"})
+    write_safetensors(loras_dir / "plain.safetensors", nar_tensors(layers=1))
+    status = (await client.get("/api/status")).json()
+    assert status["hum"] == {"available": True, "reasons": [], "adapters": ["hum_v1"]}
+    r = await client.post("/api/upload", files={"file": ("hum-2026.webm", b"\x1aE\xdf\xa3" + b"\0" * 64,
+                                                         "audio/webm")})
+    assert r.status_code == 201, r.text
+    up = r.json()
+    assert up["path_hint"].endswith(".webm")
+
+    job = (await api.submit({"kind": "hum", "params": {"upload_id": up["upload_id"], "style": "lo-fi",
+                                                        "lyrics": "la", "adapter": "hum_v1",
+                                                        "hum_influence": 1.5, "offset_s": 0.5}}))["job"]
+    assert job["kind"] == "hum" and job["title"] == "hum-2026"
+    assert set(job["params"]) == {"upload_id", "style", "lyrics", "seed", "title", "melody", "adapter",
+                                  "hum_influence", "offset_s"}
+    assert job["params"]["melody"] == "continue" and job["params"]["hum_influence"] == 1.5
+    progress, done = await api.events(job["id"])
+    assert done["status"] == "done" and done["artifacts"]["hum"] is True
+    assert done["artifacts"]["transcription"] is True and done["timing"]["transcribe"] is not None
+    stages = [e["stage"] for e in progress if e["type"] == "stage"]
+    assert stages.index("transcribe") < stages.index("hum") < stages.index("plan")
+    partial = [e for e in progress if e["type"] == "abc" and e["partial"]]
+    assert partial and partial[0]["text"].startswith("X:1\nT:Hum\n")
+    r = await client.get(f"/api/songs/{job['id']}/hum/hum.abc")
+    assert r.status_code == 200 and r.text.startswith("X:1\nT:Hum")
+    r = await client.get(f"/api/songs/{job['id']}/hum.json")
+    assert r.status_code == 200 and r.json()["adapter"] == "hum_v1" and r.json()["melody"] == "continue"
+    names = zipfile.ZipFile(io.BytesIO((await client.get(f"/api/songs/{job['id']}/artifacts.zip")).content))
+    assert f"{job['id']}/hum/hum.abc" in names.namelist() and f"{job['id']}/hum.json" in names.namelist()
+    listed = (await client.get("/api/jobs?kind=hum")).json()
+    assert [j["id"] for j in listed["jobs"]] == [job["id"]]
+
+    # no adapter, melody hum_only: no hum stage, score used verbatim
+    plain = (await api.submit({"kind": "hum", "params": {"upload_id": up["upload_id"], "style": "s",
+                                                          "lyrics": "l", "melody": "hum_only"}}))["job"]
+    progress, done = await api.events(plain["id"])
+    assert done["status"] == "done" and "hum" not in [e["stage"] for e in progress if e["type"] == "stage"]
+    assert (await client.get(f"/api/songs/{plain['id']}/hum/hum.abc")).status_code == 200
+    # melody ignore with an adapter: no transcription at all
+    ignore = (await api.submit({"kind": "hum", "params": {"upload_id": up["upload_id"], "style": "s",
+                                                           "lyrics": "l", "melody": "ignore",
+                                                           "adapter": "hum_v1"}}))["job"]
+    progress, done = await api.events(ignore["id"])
+    assert done["status"] == "done" and done["artifacts"]["transcription"] is False
+    assert done["artifacts"]["hum"] is False
+    assert (await client.get(f"/api/songs/{ignore['id']}/hum/hum.abc")).status_code == 404
+
+    # validation: unknown adapter, a plain LoRA as adapter, a hum adapter in the LoRA stack, bad ranges
+    base = {"upload_id": up["upload_id"], "style": "s", "lyrics": "l"}
+    for body, fragment in [
+        ({"kind": "hum", "params": {**base, "adapter": "nope"}}, "unknown or unusable hum adapter"),
+        ({"kind": "hum", "params": {**base, "adapter": "plain"}}, "unknown or unusable hum adapter"),
+        ({"kind": "hum", "params": {**base, "melody": "ignore"}}, "needs a hum adapter"),
+        ({"kind": "hum", "params": {**base, "hum_influence": 9}}, "hum_influence"),
+        ({"kind": "hum", "params": {**base, "offset_s": -2}}, "offset_s"),
+        ({"kind": "create", "params": BASE, "loras": [{"name": "hum_v1"}]}, "unknown or unusable LoRA"),
+    ]:
+        r = await client.post("/api/jobs", json=body)
+        assert r.status_code == 400, r.text
+        assert fragment in r.json()["error"]["message"], r.text
+    r = await client.post("/api/jobs", json={"kind": "hum", "params": {**base, "upload_id": "missing"}})
+    assert r.status_code == 404
+
+
+async def test_hum_409_when_unavailable(make_app, home, monkeypatch):
+    fake_models(home)
+    async with make_app(ColdEngine(), home=home) as (app, c):
+        status = (await c.get("/api/status")).json()
+        assert status["hum"]["available"] is False and "not downloaded" in " ".join(status["hum"]["reasons"])
+        up = (await c.post("/api/upload", files={"file": ("x.m4a", b"\0" * 8, "audio/mp4")})).json()
+        r = await c.post("/api/jobs", json={"kind": "hum", "params": {"upload_id": up["upload_id"],
+                                                                       "style": "s", "lyrics": "l"}})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+        assert "hum is unavailable" in r.json()["error"]["message"]
 
 
 async def test_cover_409_when_unavailable(make_app, home, monkeypatch):
@@ -752,6 +1049,7 @@ async def test_spa_fallback_and_static(client, static_dir):
     assert r.status_code == 200 and "real ui" in r.text
     r = await client.get("/static/app.js")
     assert r.status_code == 200 and "console.log" in r.text
+    assert r.headers["cache-control"] == "no-cache"  # modules revalidate (ETag) on every load
     r = await client.get("/static/missing.js")
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
 

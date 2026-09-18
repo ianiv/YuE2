@@ -20,7 +20,7 @@ from pathlib import Path  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 
-from yue2_studio import __version__, api  # noqa: E402
+from yue2_studio import __version__, api, uploads  # noqa: E402
 from yue2_studio.jobs import JobStore  # noqa: E402
 from yue2_studio.worker import EventBus, Worker  # noqa: E402
 
@@ -31,7 +31,7 @@ log = logging.getLogger("yue2_studio")
 def _real_engine(paths: config.Paths):
     from yue2_studio.engine import Engine  # imports mlx; deliberately lazy
 
-    return Engine(converted_dir=paths.converted_dir, vae_dir=paths.vae_dir)
+    return Engine(converted_dir=paths.converted_dir, vae_dir=paths.vae_dir, loras_dir=paths.loras_dir)
 
 
 def create_app(engine=None, *, home: str | os.PathLike | None = None, fake: bool = False,
@@ -49,9 +49,11 @@ def create_app(engine=None, *, home: str | os.PathLike | None = None, fake: bool
     store = JobStore(paths.db_path, paths.songs_dir)
     bus = EventBus()
     worker = Worker(store, engine, paths, bus, fake=is_fake)
+    worker.after_job = lambda job: uploads.auto_prune(paths, store)  # ``prune_uploads_days`` setting
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        await asyncio.to_thread(uploads.auto_prune, paths, store)
         worker.start(asyncio.get_running_loop())
         try:
             yield

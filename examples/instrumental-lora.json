@@ -1,0 +1,13 @@
+{
+  "id": "instrumental-lora",
+  "style": "dark ambient, waterphone, theremin, piano, slow, cinematic, 70 BPM",
+  "lyrics": "[intro]\n\n[verse]\n\n[chorus]\n\n[outro]",
+  "cot": "full",
+  "seed": 21,
+  "abc_sampling": {
+    "max_tokens": 1200
+  },
+  "semantic_sampling": {
+    "max_tokens": 600
+  }
+}

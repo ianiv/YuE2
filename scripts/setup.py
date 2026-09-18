@@ -4,6 +4,7 @@ Usage::
 
     uv run python scripts/setup.py               # generator + VAE
     uv run python scripts/setup.py --with-cover  # also SheetSage2 + MERT for covers
+    uv run python scripts/setup.py --with-hum    # covers' models + the hum-to-song prosody adapter
     uv run python scripts/setup.py --skip-download   # doctor only
 
 Exit status is non-zero when any doctor check fails.
@@ -39,7 +40,11 @@ def _tidy(directory: Path) -> None:
         attributes.unlink()
 
 
-def download(with_cover: bool, force: bool = False) -> None:
+HUM_ADAPTER_REPO = "Mothersuperior/YuE2-hum-to-song"
+HUM_ADAPTER_FILE = "hum_adapter_v1_combined.safetensors"  # self-contained against stock YuE2-3B
+
+
+def download(with_cover: bool, force: bool = False, with_hum: bool = False) -> None:
     from huggingface_hub import snapshot_download
     from lyra.conversion import _VAE_SOURCE_FILES
 
@@ -72,6 +77,17 @@ def download(with_cover: bool, force: bool = False) -> None:
             print(f"[setup] fetching {repo}@{revision[:8]} -> {config.HF_CACHE_DIR}", flush=True)
             snapshot_download(repo, revision=revision, cache_dir=str(config.HF_CACHE_DIR),
                               allow_patterns=["config.json", "model.safetensors"])
+    if with_hum:
+        from huggingface_hub import hf_hub_download
+
+        target = config.LORAS_DIR / HUM_ADAPTER_FILE
+        if force or not target.is_file():
+            print(f"[setup] fetching {HUM_ADAPTER_REPO}/{HUM_ADAPTER_FILE} -> {config.LORAS_DIR}", flush=True)
+            config.LORAS_DIR.mkdir(parents=True, exist_ok=True)
+            hf_hub_download(HUM_ADAPTER_REPO, HUM_ADAPTER_FILE, local_dir=str(config.LORAS_DIR))
+            _tidy(config.LORAS_DIR)
+        else:
+            print(f"[setup] hum adapter already present at {target}", flush=True)
 
 
 def doctor(verify_hashes: bool, require_ffmpeg: bool = False) -> dict:
@@ -138,14 +154,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--with-cover", action="store_true", help="also fetch SheetSage2 + MERT-v2-FullSong")
+    parser.add_argument("--with-hum", action="store_true",
+                        help="also fetch the cover models and the hum-to-song adapter into models/loras")
     parser.add_argument("--skip-download", action="store_true", help="only run the doctor report")
     parser.add_argument("--force", action="store_true", help="re-download even when the trees look complete")
     parser.add_argument("--no-verify-hashes", action="store_true",
                         help="skip hashing the ~10 GB of weights in the doctor report")
     args = parser.parse_args(argv)
     if not args.skip_download:
-        download(args.with_cover, force=args.force)
-    report = doctor(verify_hashes=not args.no_verify_hashes, require_ffmpeg=args.with_cover)
+        download(args.with_cover or args.with_hum, force=args.force, with_hum=args.with_hum)
+    report = doctor(verify_hashes=not args.no_verify_hashes, require_ffmpeg=args.with_cover or args.with_hum)
     print(json.dumps(report, indent=2))
     for warning in report["warnings"]:
         print(f"[setup] warning: {warning}", file=sys.stderr)
@@ -153,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         failed = sorted(k for k, ok in report["checks"].items() if not ok)
         print(f"[setup] doctor FAILED: {', '.join(failed)}", file=sys.stderr)
         return 1
-    if args.with_cover and not report["cover"]["available"]:
+    if (args.with_cover or args.with_hum) and not report["cover"]["available"]:
         print("[setup] cover models incomplete", file=sys.stderr)
         return 1
     print("[setup] doctor passed", file=sys.stderr)
