@@ -54,7 +54,7 @@ nav.main > a:hover, nav.main > details.menu > summary:hover { color: var(--text)
 nav.main > a[aria-current="page"], nav.main > details.menu > summary[aria-current="page"], nav.main > details.menu[open] > summary { color: var(--text); background: var(--surface-2); }
 nav.main > .nav-queue { margin-left: auto; }
 #engine-pill { margin-left: auto; }
-nav.main .caret { font-size: 10px; margin-left: 4px; opacity: .7; }
+nav.main .caret { font-size: 14px; line-height: 1; margin-left: 5px; opacity: .8; }
 nav.main .menu-list { left: 0; right: auto; z-index: 20; min-width: 140px; }
 nav.main .menu-list a[aria-current="page"] { color: var(--text); background: var(--surface-2); font-weight: 600; }
 .badge-count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
