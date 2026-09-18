@@ -6,6 +6,7 @@ import { queueView } from "./views/queue.js";
 import { libraryView } from "./views/library.js";
 import { songView } from "./views/song.js";
 import { coverView } from "./views/cover.js";
+import { humView } from "./views/hum.js";
 import { settingsView } from "./views/settings.js";
 
 export const app = { status: null, settings: null, listeners: new Set() };
@@ -27,7 +28,7 @@ async function refreshStatus() {
 }
 
 const routes = {
-  create: createView, queue: queueView, library: libraryView, song: songView, cover: coverView, settings: settingsView,
+  create: createView, queue: queueView, library: libraryView, song: songView, cover: coverView, hum: humView, settings: settingsView,
 };
 let current = null, routeGen = 0;
 

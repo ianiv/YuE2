@@ -1,12 +1,12 @@
 import { api } from "../api.js";
-import { fill, h, presetPicker, rememberGroup, seedField, store, toast, toastError } from "../ui.js";
+import { fill, h, loraPicker, presetPicker, rememberGroup, seedField, store, toast, toastError } from "../ui.js";
 import { liveCard, resultCard } from "./jobcard.js";
 
 const RECENT_MAX = 20;
 
 const GENRES = ["pop, female vocal, upbeat", "lo-fi hip hop", "orchestral cinematic", "indie rock, male vocal", "jazz trio", "edm, synth", "warm piano ballad", "city pop, groovy bass"];
 const SECTIONS = ["[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Bridge]", "[Interlude]", "[Outro]"];
-const DEFAULTS = { title: "", style: "", lyrics: "", cot: "full", seed: "", random_seed: true, cfg_scale: "", abc: "", count: 1, random_seeds: false, preset: "quality", precision: "8bit", ode_steps: 16 };
+const DEFAULTS = { title: "", style: "", lyrics: "", cot: "full", seed: "", random_seed: true, cfg_scale: "", abc: "", count: 1, random_seeds: false, preset: "quality", precision: "8bit", ode_steps: 16, loras: [] };
 
 export async function createView({ el, query, app }) {
   const saved = { ...DEFAULTS, ...store.get("create", {}) };
@@ -15,7 +15,7 @@ export async function createView({ el, query, app }) {
     try {
       const { job } = await api.job(query.from);
       Object.assign(saved, { title: job.params.title || "", style: job.params.style || "", lyrics: job.params.lyrics || "", cot: job.params.cot || "full",
-        seed: job.seed, random_seed: false, cfg_scale: job.params.cfg_scale ?? "", abc: job.params.abc || "", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, count: 3 });
+        seed: job.seed, random_seed: false, cfg_scale: job.params.cfg_scale ?? "", abc: job.params.abc || "", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: job.loras || [], count: 3 });
       toast(`Prefilled from ${job.title || job.id.slice(0, 8)} — set Variations and submit`, "info");
     } catch (e) { toastError(e); }
   }
@@ -34,6 +34,15 @@ export async function createView({ el, query, app }) {
   const cotSeg = h("div", { class: "seg", role: "group", "aria-label": "Mode" }, ["full", "melody", "off"].map((m) =>
     h("button", { type: "button", dataset: { m }, "aria-pressed": String(m === cot), onclick: () => { cot = m; cotSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === cot))); abcDetails.hidden = cot === "off"; } }, m)));
   const presets = presetPicker({ preset: saved.preset, precision: saved.precision, ode_steps: saved.ode_steps }, app.status && app.status.presets);
+  let adapters = app.status && app.status.loras ? app.status.loras.adapters : [];
+  const loras = loraPicker(saved.loras, adapters);
+  // Instrumental AR adapters (name contains "inst") overrun to the length cap with timed section tags.
+  const instHint = h("span", { class: "hint", hidden: true }, "Instrumental adapter: use bare section tags ([intro], [verse]…) or [instrumental] in the lyrics — timed tags tend to overrun to the length cap; songs land around 3–5 min regardless of the plan.");
+  const isInst = (name) => { const a = adapters.find((x) => x.name === name); return /inst/i.test(name) && (!a || !a.parts || a.parts.includes("ar")); };
+  const updateInstHint = () => { instHint.hidden = !loras.value().some((l) => isInst(l.name)); };
+  loras.addEventListener("input", updateInstHint); updateInstHint();
+  const onStatus = (s) => { if (s && s.loras) { adapters = s.loras.adapters; loras.update(adapters); updateInstHint(); } };
+  app.listeners.add(onStatus);
   const abcDetails = h("details", { hidden: cot === "off", open: !!saved.abc }, h("summary", {}, "Supply an ABC score (optional)"),
     h("p", { class: "hint" }, "Paste an ABC score (or load a .abc/.txt file) to skip planning; the engine follows it. Not allowed with mode “off”."),
     h("label", { class: "row small" }, "Load file", h("input", { id: "f-abc-file", type: "file", accept: ".abc,.txt,text/plain", style: "width:auto", onchange: async (e) => {
@@ -60,6 +69,8 @@ export async function createView({ el, query, app }) {
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Mode (chain of thought)"), cotSeg,
         h("span", { class: "hint" }, "full = plan score + arrangement, melody = plan melody only, off = no score")),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
+      h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras,
+        h("span", { class: "hint" }, "Merged into the AR / acoustic weights for this job; stack an AR adapter with a NAR one. Scale 1 = as trained."), instHint),
       h("div", { class: "grid2" },
         h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
         h("label", { class: "field" }, h("span", { class: "lbl" }, "CFG scale"), f.cfg)),
@@ -109,7 +120,7 @@ export async function createView({ el, query, app }) {
 
   function collect() {
     const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, cot, seed: f.seed.raw(), random_seed: f.seed.isRandom(),
-      cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), abc: f.abc.value, count: Math.max(1, Number(f.count.value) || 1), random_seeds: f.random.checked, ...presets.value() };
+      cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), abc: f.abc.value, count: Math.max(1, Number(f.count.value) || 1), random_seeds: f.random.checked, loras: loras.value(), ...presets.value() };
     store.set("create", v);
     return v;
   }
@@ -121,7 +132,7 @@ export async function createView({ el, query, app }) {
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     if (v.abc.trim() && v.cot === "off") return toast("An ABC score cannot be used with mode “off” — pick full or melody", "err");
     const base = { style: v.style, lyrics: v.lyrics, cot: v.cot, seed: f.seed.value(), cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale, abc: v.abc.trim() || null, title: v.title || null };
-    const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps };
+    const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras };
     submit.disabled = true;
     try {
       let jobs;
@@ -140,5 +151,5 @@ export async function createView({ el, query, app }) {
     } catch (err) { toastError(err); }
     submit.disabled = false; // queue another take right away
   }
-  return { unmount() { clearInterval(tick); live.forEach((c) => c.close()); } };
+  return { unmount() { clearInterval(tick); app.listeners.delete(onStatus); live.forEach((c) => c.close()); } };
 }

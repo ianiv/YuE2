@@ -17,10 +17,21 @@ import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from yue2_studio import audio
 from yue2_studio.fake import FakeEngine
 from yue2_studio.main import create_app
 
 BASE = {"style": "dreamy indie pop, female vocal", "lyrics": "[verse]\nla la\n[chorus]\nda da", "seed": 42}
+
+
+@pytest.fixture
+def fake_probe(monkeypatch):
+    """Uploads here are a few junk bytes: pretend ffprobe read them so ``POST /api/upload`` accepts them.
+
+    The real ``probe_duration`` is exercised in ``test_audio.py``; the unreadable-audio rejection in
+    ``test_api.py`` overrides this stub.
+    """
+    monkeypatch.setattr(audio, "probe_duration", lambda path: 12.3)
 
 
 @pytest.fixture
@@ -44,7 +55,7 @@ def engine():
 
 
 @pytest.fixture
-async def app(engine, home, static_dir):
+async def app(engine, home, static_dir, fake_probe):
     application = create_app(engine, home=home, static_dir=static_dir)
     async with application.router.lifespan_context(application):
         yield application
@@ -57,7 +68,7 @@ async def client(app):
 
 
 @pytest.fixture
-def make_app(tmp_path):
+def make_app(tmp_path, fake_probe):
     """``async with make_app(engine, home=..., static_dir=...) as (app, client)``."""
 
     @contextlib.asynccontextmanager

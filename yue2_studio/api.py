@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from yue2_studio import __version__, audio, config, jobs
+from yue2_studio import __version__, audio, config, jobs, lora, uploads
 from yue2_studio.jobs import Job, JobStore, NotFound, ValidationFailure
 from yue2_studio.worker import Worker
 
@@ -124,23 +124,7 @@ def _song_dir(request: Request, job_id: str) -> Path:
     return Path(_state(request).paths.songs_dir) / job_id
 
 
-def _upload_sidecar(paths: config.Paths, upload_id: str) -> Path:
-    return paths.uploads_dir / f"{upload_id}.json"
-
-
-def upload_lookup(paths: config.Paths, upload_id: str) -> dict | None:
-    if not upload_id or "/" in upload_id or "\\" in upload_id or "." in upload_id:
-        return None
-    sidecar = _upload_sidecar(paths, upload_id)
-    if not sidecar.is_file():
-        return None
-    try:
-        info = json.loads(sidecar.read_text())
-    except (OSError, ValueError):
-        return None
-    if not (paths.uploads_dir / f"{upload_id}.{info.get('ext', '')}").is_file():
-        return None
-    return info
+upload_lookup = uploads.lookup  # (paths, upload_id) -> sidecar info | None
 
 
 async def _json_body(request: Request) -> Any:
@@ -173,6 +157,45 @@ def _cover_status(request: Request) -> dict:
     return {"available": info["available"], "reasons": reasons}
 
 
+def _loras(request: Request) -> dict:
+    return lora.summary(_state(request).paths.loras_dir)
+
+
+def _hum_status(request: Request) -> dict:
+    """Whether hum-to-song can run (cover prerequisites + librosa) and the hum adapters found."""
+    state = _state(request)
+    adapters = [a.name for a in lora.list_hum_adapters(state.paths.loras_dir)]
+    if state.fake:
+        return {"available": True, "reasons": [], "adapters": adapters}
+    info = config.hum_available(state.paths)
+    reasons = []
+    if not info["ffmpeg"]:
+        reasons.append("ffmpeg not found on PATH")
+    if not info["sheetsage2"]:
+        reasons.append("SheetSage2 not downloaded")
+    if not info["mert"]:
+        reasons.append("MERT-v2-FullSong not downloaded")
+    if not info["librosa"]:
+        reasons.append("librosa not installed (run uv sync)")
+    return {"available": info["available"], "reasons": reasons, "adapters": adapters}
+
+
+def _hum_adapter_usable(request: Request, name: str) -> bool:
+    try:
+        lora.find_hum_adapter(_state(request).paths.loras_dir, name)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _lora_usable(request: Request, name: str) -> bool:
+    try:
+        lora.find_adapter(_state(request).paths.loras_dir, name)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------------------------
 # status / settings
 # ---------------------------------------------------------------------------------------------
@@ -191,10 +214,18 @@ async def get_status(request: Request):
         "models": {"converted_dir": str(state.paths.converted_dir), "vae_dir": str(state.paths.vae_dir),
                    "present": _models_present(request), "precisions": models["precisions"]},
         "cover": _cover_status(request),
+        "hum": _hum_status(request),
+        "loras": _loras(request),
         "ffmpeg": audio.ffmpeg_path() is not None,
         "fake": bool(state.fake),
         "version": __version__,
     }
+
+
+@router.get("/loras")
+async def get_loras(request: Request):
+    """Rescan ``models/loras`` (``.safetensors`` files and PEFT directories); never 503."""
+    return _loras(request)
 
 
 @router.get("/settings")
@@ -227,8 +258,14 @@ async def post_jobs(request: Request):
         cover = _cover_status(request)
         if not cover["available"]:
             raise ApiError(409, "conflict", "cover is unavailable: " + "; ".join(cover["reasons"]))
+    if body.get("kind") == "hum":
+        hum_status = _hum_status(request)
+        if not hum_status["available"]:
+            raise ApiError(409, "conflict", "hum is unavailable: " + "; ".join(hum_status["reasons"]))
     state = _state(request)
-    submission = jobs.submit(state.store, body, upload_lookup=lambda uid: upload_lookup(state.paths, uid))
+    submission = jobs.submit(state.store, body, upload_lookup=lambda uid: upload_lookup(state.paths, uid),
+                             lora_lookup=lambda name: _lora_usable(request, name),
+                             hum_adapter_lookup=lambda name: _hum_adapter_usable(request, name))
     for job in submission.jobs:
         state.worker.submit(job.id)
     if submission.group is not None:
@@ -392,6 +429,18 @@ async def song_transcription_score(request: Request, job_id: str):
     return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/plain; charset=utf-8")
 
 
+@router.api_route("/songs/{job_id}/hum/hum.abc", methods=["GET", "HEAD"])
+async def song_hum_score(request: Request, job_id: str):
+    path = _artifact(request, job_id, "hum/hum.abc")
+    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/plain; charset=utf-8")
+
+
+@router.api_route("/songs/{job_id}/hum.json", methods=["GET", "HEAD"])
+async def song_hum_json(request: Request, job_id: str):
+    path = _artifact(request, job_id, "hum.json")
+    return Response(path.read_bytes(), media_type="application/json")
+
+
 @router.api_route("/songs/{job_id}/artifacts.zip", methods=["GET", "HEAD"])
 async def song_artifacts_zip(request: Request, job_id: str):
     _get_job(request, job_id)
@@ -431,12 +480,61 @@ async def post_upload(request: Request, file: UploadFile | None = None):
         raise ApiError(413, "too_large", str(error)) from None
     finally:
         await file.close()
+    if size == 0:
+        destination.unlink(missing_ok=True)
+        raise ApiError(400, "validation_error", "The uploaded file is empty (0 bytes) — if it lives in "
+                       "iCloud/Dropbox, download it first")
     seconds = await asyncio.to_thread(audio.probe_duration, destination)
+    # Without ffprobe the duration is simply unknown; with it, an unreadable file would only fail later
+    # in the worker with an opaque ffmpeg exit status, so reject it here.
+    if seconds is None and audio.ffprobe_path() is not None:
+        destination.unlink(missing_ok=True)
+        raise ApiError(400, "validation_error",
+                       "ffmpeg could not read the uploaded audio (unsupported or corrupt file)")
     info = {"upload_id": upload_id, "filename": Path(file.filename or f"upload.{ext}").name, "ext": ext,
             "seconds": seconds, "size": size, "created_at": jobs.now_iso()}
-    _upload_sidecar(paths, upload_id).write_text(json.dumps(info))
+    uploads.sidecar(paths, upload_id).write_text(json.dumps(info))
     return JSONResponse({"upload_id": upload_id, "filename": info["filename"], "seconds": seconds,
                          "path_hint": f"data/uploads/{upload_id}.{ext}"}, status_code=201)
+
+
+@router.get("/uploads")
+async def list_uploads(request: Request, unused: bool = False):
+    """Every upload with its job counts, newest first; ``?unused=true`` keeps only unreferenced ones."""
+    state = _state(request)
+    items = await asyncio.to_thread(uploads.scan, state.paths, state.store)
+    if unused:
+        items = [u for u in items if u["jobs"]["total"] == 0]
+    return {"uploads": items}
+
+
+@router.delete("/uploads/{upload_id}", status_code=204)
+async def delete_upload(request: Request, upload_id: str):
+    state = _state(request)
+    entry = await asyncio.to_thread(uploads.find, state.paths, state.store, upload_id)
+    if entry is None:
+        raise ApiError(404, "not_found", f"upload {upload_id!r} not found")
+    if entry["jobs"]["active"]:
+        raise ApiError(409, "in_use", f"upload {upload_id!r} is used by a queued or running job")
+    await asyncio.to_thread(uploads.delete, state.paths, upload_id)
+    return Response(status_code=204)
+
+
+@router.post("/uploads/prune")
+async def prune_uploads(request: Request):
+    """Body ``{"unused": true, "older_than_days": N|null}``; in-use uploads are always skipped."""
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        raise ApiError(400, "validation_error", "body must be a JSON object")
+    unused = body.get("unused", True)
+    days = body.get("older_than_days")
+    if not isinstance(unused, bool):
+        raise ApiError(400, "validation_error", "unused must be a boolean")
+    if days is not None and (isinstance(days, bool) or not isinstance(days, int) or days < 1):
+        raise ApiError(400, "validation_error", "older_than_days must be a positive integer or null")
+    state = _state(request)
+    return await asyncio.to_thread(uploads.prune, state.paths, state.store, unused=unused,
+                                   older_than_days=days)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -452,7 +550,12 @@ def spa_response(static_dir: Path) -> HTMLResponse:
 
 
 class _LenientStaticFiles:
-    """``StaticFiles`` that answers 404 (instead of raising) while the directory does not exist yet."""
+    """``StaticFiles`` that answers 404 (instead of raising) while the directory does not exist yet.
+
+    Every response carries ``Cache-Control: no-cache`` so browsers revalidate the ES modules against
+    their ETag on each load (cheap, local) instead of heuristically caching them for hours; without
+    it a restarted server keeps serving a stale UI to tabs that already visited it.
+    """
 
     def __new__(cls, directory: Path):
         from starlette.staticfiles import StaticFiles
@@ -466,7 +569,9 @@ class _LenientStaticFiles:
             async def get_response(self, path: str, scope):
                 if not Path(directory).is_dir():
                     raise StarletteHTTPException(status_code=404)
-                return await super().get_response(path, scope)
+                response = await super().get_response(path, scope)
+                response.headers["Cache-Control"] = "no-cache"
+                return response
 
         return Lenient(directory=str(directory), check_dir=False)
 

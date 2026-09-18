@@ -38,7 +38,11 @@ class FakePipeline:
     def close(self):
         self.closed = True
 
-    def token_observer(self):
+    def set_loras(self, stack, hum_adapter=None):
+        self.loras = list(stack)
+        self.hum_adapter = hum_adapter
+
+    def token_observer(self, user_callback=None, *, abc_prefix=""):
         return lambda phase, token: None
 
     def check_execution(self):
@@ -124,6 +128,75 @@ def test_stage_timings_reset_between_jobs_on_resident_pipeline(engine, tmp_path)
     assert pipe.stage_timings == {"Planning score": 1.0}  # not 2.0: reset at the top of each job
 
 
+class Tok:
+    """Word-level stand-in for the YuE2 tokenizer: one id per whitespace-separated token."""
+
+    def encode(self, text):
+        return [hash(w) % 1000 for w in text.replace("\n", " \n ").split(" ") if w]
+
+    def decode(self, ids):
+        return " ".join(f"<{i}>" for i in ids)
+
+
+def test_plan_continuation_builds_an_open_prefix_and_a_closed_plan(monkeypatch):
+    from yue2.protocol import ABC_END, ABC_START, MUSIC_START, GenerationConfig, SongRequest, token_prefixes
+
+    from yue2_studio.engine import StudioPipeline
+
+    pipe = StudioPipeline.__new__(StudioPipeline)  # no upstream __init__ (would need the models)
+    pipe.tokenizer = Tok()
+    pipe.generation_config = GenerationConfig()
+    calls = []
+
+    def fake_generate(prefix, sampling, seed, phase, **kwargs):
+        calls.append((list(prefix), sampling, seed, phase, kwargs))
+        return [7, 8, 9], {"seconds": 1.0, "output_tokens": 3}, False
+
+    monkeypatch.setattr(pipe, "_generate", fake_generate)
+    request = SongRequest(style="s", lyrics="l", cot="melody", seed=5)
+    open_abc = "X:1\nK:C\nV: Vocal\nC D E |\n"
+    plan = pipe.plan_continuation(request, open_abc, abc_sampling={"max_tokens": 50}, cancelled=None,
+                                  on_token=None)
+    partial = pipe.tokenizer.encode(open_abc)
+    (prefix, sampling, seed, phase, kwargs), = calls
+    assert prefix == token_prefixes(request, pipe.tokenizer) + partial  # ends inside the score
+    assert prefix[-len(partial) - 1] == ABC_START and ABC_END not in prefix and MUSIC_START not in prefix
+    assert sampling.max_tokens == 50 and seed == 5 and phase == "abc"
+    assert plan.abc_ids == partial + [7, 8, 9] and plan.truncated is False
+    assert plan.timing == {"seconds": 1.0, "output_tokens": 3, "continuation_prefix_tokens": len(partial)}
+    assert plan.prefix == token_prefixes(request, pipe.tokenizer, plan.abc_ids)  # generate_semantic's check
+    assert plan.prefix[-2:] == [ABC_END, MUSIC_START]
+    assert plan.abc == pipe.tokenizer.decode(plan.abc_ids)
+    with pytest.raises(ValueError, match="newline"):
+        pipe.plan_continuation(request, "X:1\nK:C", cancelled=None, on_token=None)
+    with pytest.raises(ValueError, match="cot=melody"):
+        pipe.plan_continuation(SongRequest(style="s", lyrics="l", cot="off"), open_abc)
+
+
+def test_run_create_uses_planner_synthesizer_and_config_extra(engine, tmp_path):
+    """The hum hooks replace plan()/synthesize() and change the request identity via config_extra."""
+    from yue2.storage import identity
+
+    options = config.resolve_preset("fast")
+    engine.ensure(options)
+    pipe = engine.pipeline
+    seen = {}
+
+    def planner(p, native, sampling, cancelled, observer):
+        seen["planner"] = (p is pipe, native.cot, sampling)
+        raise InterruptedError("stop here")  # the rest of the stage body needs the real models
+
+    with pytest.raises(InterruptedError), engine._busy(pipe):
+        engine._run_create(pipe, {**REQUEST, "cot": "melody"}, {}, {"max_tokens": 5}, None, tmp_path / "a",
+                           options=options, cancelled=None, planner=planner, config_extra={"hum": {"x": 1}})
+    assert seen["planner"] == (True, "melody", {"max_tokens": 5})
+    # config_extra is part of the identity: the same request without it hashes differently
+    base = pipe.effective_config(pipe.build_request(**{**REQUEST, "cot": "melody"}), {"max_tokens": 5}, None)
+    with_extra = {**base, "hum": {"x": 1}}
+    assert identity({"request": {}, "config": base, "weights": {}}) != identity(
+        {"request": {}, "config": with_extra, "weights": {}})
+
+
 def test_precision_change_rebuilds_but_ode_steps_does_not(engine):
     engine.ensure(config.resolve_preset("fast"))
     first = engine.pipeline
@@ -135,3 +208,21 @@ def test_precision_change_rebuilds_but_ode_steps_does_not(engine):
     assert engine.precision == "bf16"
     engine.unload()
     assert engine.state == "cold"
+
+
+@pytest.mark.skipif(not (config.CONVERTED_DIR / "qwen.tiktoken").is_file(), reason="models/converted missing")
+def test_open_score_cut_is_an_exact_token_boundary_with_the_real_tokenizer():
+    """The continuation tokenises exactly like a score written in one go when the cut ends a line."""
+    from yue2.tokenization_yue2 import YuE2TextTokenizer
+
+    from yue2_studio import hum
+
+    tok = YuE2TextTokenizer(config.CONVERTED_DIR / "qwen.tiktoken")
+    head = hum.trim_open_score("X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=100\nK:C\n% intro\nV: Vocal\n"
+                               "C4D4E4F4|G8A8|\nV: Ins\nZ2|\nV: Vocal\nZ|\nV: Ins\nZ|\n")
+    tail = "V: Ins\nZ2|\n% verse\nV: Vocal\nz4G2G2G4E2E2-|E2D2D4z8|\n"
+    assert head.endswith("G8A8|\n")
+    assert tok.encode(head + tail) == tok.encode(head) + tok.encode(tail)
+    # "|\n" is one BPE token: cutting before the newline would split it and shift the continuation
+    bare = head.rstrip("\n")
+    assert tok.encode(bare + "\n" + tail) != tok.encode(bare) + tok.encode("\n" + tail)

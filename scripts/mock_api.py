@@ -45,8 +45,30 @@ JOBS: dict[str, dict] = {}
 GROUPS: dict[str, dict] = {}
 UPLOADS: dict[str, dict] = {}
 SUBS: dict[str, list[asyncio.Queue]] = {}
-SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system"}
-ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None}
+SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system",
+            "prune_uploads_days": None}
+ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None, "loras": []}
+
+
+def _lora(name, **fields):
+    base = {"name": name, "path": f"/abs/models/loras/{name}.safetensors", "format": "safetensors",
+            "valid": True, "rank": None, "scale": 1.0, "dtype": "BF16", "parts": [], "targets": [],
+            "ar_modules": 0, "nar_modules": 0, "replaced": [], "size_bytes": 0, "metadata": {}, "error": None}
+    return {**base, **fields}
+
+
+LORAS = [
+    _lora("ar_lora_inst_v3abc.bf16", rank=64, parts=["ar"], ar_modules=196, size_bytes=139502088,
+          targets=["mlp.down_proj", "mlp.gate_proj", "mlp.up_proj", "self_attn.k_proj", "self_attn.o_proj",
+                   "self_attn.q_proj", "self_attn.v_proj"],
+          metadata={"intended_cot": "full", "rank": "64", "lora_scale": "1.0"}),
+    _lora("nar_lora_joint_v4.bf16", rank=32, parts=["nar"], nar_modules=196, size_bytes=70301856,
+          targets=["nar_mlp.down_proj", "nar_self_attn.q_proj"], replaced=["llm2vae", "vae2llm"],
+          metadata={"lora_scale": "1.0"}),
+    _lora("hum_adapter_v1", valid=False, scale=None, dtype=None,
+          error="unsupported tensors hum_proj.0.bias, hum_proj.0.weight "
+                "(hum-to-song conditioning projections need the hum carrier path, not supported)"),
+]
 DELAY = 0.2
 SEQ = 0
 COVER_OK = True
@@ -121,7 +143,8 @@ async def publish(job: dict, ev: dict | None, done: bool = False) -> None:
         await q.put(("done", {"job": job}) if done else ("progress", ev))
 
 
-def new_job(kind: str, params: dict, preset: str, precision: str | None, ode_steps: int | None) -> dict:
+def new_job(kind: str, params: dict, preset: str, precision: str | None, ode_steps: int | None,
+            loras: list | None = None) -> dict:
     p = {"quality": ("bf16", 32), "fast": ("8bit", 8)}.get(preset, (precision, ode_steps))
     global SEQ
     SEQ += 1
@@ -137,6 +160,7 @@ def new_job(kind: str, params: dict, preset: str, precision: str | None, ode_ste
         "preset": preset,
         "precision": p[0],
         "ode_steps": p[1],
+        "loras": loras or [],
         "seed": seed,
         "params": params,
         "title": params.get("title"),
@@ -163,7 +187,8 @@ def public(job: dict) -> dict:
 
 
 async def run_job(job: dict) -> None:
-    ENGINE.update(state="busy", precision=job["precision"], memory_gib=11.2, current_job_id=job["id"])
+    ENGINE.update(state="busy", precision=job["precision"], memory_gib=11.2, current_job_id=job["id"],
+                  loras=job["loras"])
     job.update(status="running", started_at=now())
     await publish(job, event(job["id"], type="status", status="running", message="job started"))
     stages = (
@@ -257,6 +282,7 @@ def status() -> dict:
         "engine": ENGINE,
         "queue": {"queued": sum(j["status"] == "queued" for j in JOBS.values()), "running": running},
         "presets": presets_summary(),
+        "loras": {"dir": "/abs/models/loras", "adapters": LORAS},
         "ffmpeg": AUDIO_TYPE == "audio/flac",
         "version": "0.1.0-mock",
         "models": {"converted_dir": "/abs/models/converted", "vae_dir": "/abs/models/vae", "present": True},
@@ -265,6 +291,30 @@ def status() -> dict:
             "reasons": [] if COVER_OK else ["MERT-v2-FullSong not downloaded", "ffmpeg missing"],
         },
     }
+
+
+@app.get("/api/loras")
+def get_loras() -> dict:
+    return {"dir": "/abs/models/loras", "adapters": LORAS}
+
+
+def _loras(body: dict):
+    """Validated ``[{name, scale}]`` from the submit body, or an error response."""
+    raw = body.get("loras")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(x, dict) and x.get("name") for x in raw):
+        return err(400, "validation_error", "loras must be a list of {name, scale}")
+    out = []
+    for item in raw:
+        scale = item.get("scale", 1.0)
+        if not isinstance(scale, int | float) or not 0 <= scale <= 4:
+            return err(400, "validation_error", f"loras.{len(out)}.scale must be in [0, 4]")
+        known = next((a for a in LORAS if a["name"] == item["name"]), None)
+        if known is None or not known["valid"]:
+            return err(400, "validation_error", f"unknown or unusable LoRA adapter {item['name']!r}")
+        out.append({"name": item["name"], "scale": float(scale)})
+    return out
 
 
 @app.post("/api/jobs")
@@ -282,6 +332,9 @@ async def post_job(req: Request):
         precision not in PRECISIONS or not isinstance(ode, int) or not MIN_ODE_STEPS <= ode <= MAX_ODE_STEPS
     ):
         return err(400, "validation_error", "custom preset needs precision and ode_steps 4..64")
+    loras = _loras(body)
+    if isinstance(loras, JSONResponse):
+        return loras
     if kind == "variations":
         base, count = params.get("base") or {}, params.get("count")
         if (
@@ -297,9 +350,8 @@ async def post_job(req: Request):
         jobs = []
         for i in range(count):
             seed = random.randint(0, 2**31 - 1) if params.get("random_seeds") else seed0 + i
-            j = new_job(
-                "create", {**base, "seed": seed, "cot": base.get("cot", "full")}, preset, precision, ode
-            )
+            j = new_job("create", {**base, "seed": seed, "cot": base.get("cot", "full")}, preset, precision,
+                        ode, loras)
             j["group_id"], JOBS[j["id"]] = gid, j
             jobs.append(j)
             await asyncio.sleep(0.001)  # distinct created_at ordering
@@ -329,6 +381,8 @@ async def post_job(req: Request):
         }
         if body.get("preset") is None:
             preset, precision, ode = parent["preset"], parent["precision"], parent["ode_steps"]
+        if loras is None:
+            loras = parent.get("loras") or []
     else:
         if not COVER_OK:
             return err(409, "conflict", "cover unavailable")
@@ -338,7 +392,7 @@ async def post_job(req: Request):
         if not params.get("style") or not params.get("lyrics"):
             return err(400, "validation_error", "style and lyrics are required")
         params = {"task": "melody-full", **params, "title": params.get("title") or Path(up["filename"]).stem}
-    job = new_job(kind, params, preset, precision, ode)
+    job = new_job(kind, params, preset, precision, ode, loras)
     job["parent_id"] = params.get("parent_id")
     JOBS[job["id"]] = job
     return JSONResponse({"job": public(job)}, status_code=201)
@@ -449,7 +503,8 @@ async def upload(file: UploadFile):
     if len(data) > 200 * 2**20:
         return err(413, "too_large", "upload exceeds 200 MB")
     uid = uuid.uuid4().hex
-    UPLOADS[uid] = {"filename": file.filename, "seconds": round(len(data) / 192000, 1)}
+    UPLOADS[uid] = {"upload_id": uid, "filename": file.filename, "ext": ext, "size": len(data),
+                    "seconds": round(len(data) / 192000, 1), "created_at": now(), "broken": False}
     return JSONResponse(
         {
             "upload_id": uid,
@@ -459,6 +514,45 @@ async def upload(file: UploadFile):
         },
         status_code=201,
     )
+
+
+def _upload_jobs(uid: str) -> dict:
+    refs = [j for j in JOBS.values() if j["params"].get("upload_id") == uid]
+    return {"total": len(refs), "active": sum(j["status"] in ("queued", "running") for j in refs)}
+
+
+def _uploads() -> list[dict]:
+    items = [{**u, "jobs": _upload_jobs(uid)} for uid, u in UPLOADS.items()]
+    return sorted(items, key=lambda u: u["created_at"], reverse=True)
+
+
+@app.get("/api/uploads")
+def list_uploads(unused: bool = False) -> dict:
+    items = _uploads()
+    return {"uploads": [u for u in items if u["jobs"]["total"] == 0] if unused else items}
+
+
+@app.delete("/api/uploads/{uid}")
+def delete_upload(uid: str):
+    if uid not in UPLOADS:
+        return err(404, "not_found", "unknown upload")
+    if _upload_jobs(uid)["active"]:
+        return err(409, "in_use", "upload is used by a queued or running job")
+    del UPLOADS[uid]
+    return Response(status_code=204)
+
+
+@app.post("/api/uploads/prune")
+async def prune_uploads(req: Request) -> dict:
+    body = await req.json()
+    unused, deleted, skipped = body.get("unused", True), 0, 0
+    for u in _uploads():
+        if u["jobs"]["total"] > 0 if unused else u["jobs"]["active"] > 0:
+            skipped += 1
+        else:
+            del UPLOADS[u["upload_id"]]
+            deleted += 1
+    return {"deleted": deleted, "skipped": skipped}
 
 
 @app.get("/api/settings")

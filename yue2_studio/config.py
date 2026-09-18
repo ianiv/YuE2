@@ -67,6 +67,7 @@ DB_PATH = DATA_DIR / "app.db"
 MODELS_DIR = HOME / "models"
 CONVERTED_DIR = MODELS_DIR / "converted"
 VAE_DIR = MODELS_DIR / "vae"
+LORAS_DIR = MODELS_DIR / "loras"
 HF_CACHE_DIR = MODELS_DIR / "hf-cache"
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -112,11 +113,15 @@ class Paths:
         return self.models_dir / "vae"
 
     @property
+    def loras_dir(self) -> Path:
+        return self.models_dir / "loras"
+
+    @property
     def hf_cache_dir(self) -> Path:
         return self.models_dir / "hf-cache"
 
     def ensure_dirs(self) -> None:
-        for path in (self.songs_dir, self.uploads_dir, self.models_dir):
+        for path in (self.songs_dir, self.uploads_dir, self.models_dir, self.loras_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 
@@ -129,21 +134,66 @@ def ensure_dirs() -> None:
     paths_for().ensure_dirs()
 
 
+LoraStack = tuple[tuple[str, float], ...]
+
+
+def normalise_loras(value) -> LoraStack:
+    """``[{"name", "scale"?}]`` / ``[(name, scale)]`` / ``["name"]`` -> validated ``((name, scale), ...)``."""
+    from yue2_studio import lora as _lora
+
+    if value is None:
+        return ()
+    if isinstance(value, str | dict):
+        value = [value]
+    stack: list[tuple[str, float]] = []
+    for item in value:
+        if isinstance(item, str):
+            name, scale = item, 1.0
+        elif isinstance(item, dict):
+            name, scale = item.get("name"), item.get("scale", 1.0)
+        else:
+            name, scale = tuple(item)
+        if not _lora.valid_name(name):
+            raise ValueError(f"invalid LoRA adapter name {name!r}")
+        if scale is None:
+            scale = 1.0
+        try:
+            scale = _lora.check_scale(scale)
+        except ValueError as error:
+            raise ValueError(f"LoRA {name!r}: {error}") from None
+        if any(n == name for n, _ in stack):
+            raise ValueError(f"LoRA adapter {name!r} is listed twice")
+        stack.append((name, scale))
+    if len(stack) > _lora.MAX_STACK:
+        raise ValueError(f"at most {_lora.MAX_STACK} LoRA adapters per job")
+    return tuple(stack)
+
+
+def loras_to_api(stack: LoraStack) -> list[dict]:
+    return [{"name": name, "scale": scale} for name, scale in stack]
+
+
 @dataclass(frozen=True)
 class EngineOptions:
-    """Everything the engine needs to pick/build a pipeline and configure one job."""
+    """Everything the engine needs to pick/build a pipeline and configure one job.
+
+    ``loras`` is the ordered stack of ``(adapter name, scale)`` merged into the resident weights for
+    the job (see ``yue2_studio.lora``); it is per job and never forces a pipeline rebuild.
+    """
 
     precision: str = "bf16"
     ode_steps: int = 32
     memory_budget_gib: float = DEFAULT_MEMORY_BUDGET_GIB
     require_ac: bool = DEFAULT_REQUIRE_AC
     preset: str = "quality"
+    loras: LoraStack = ()
 
     def __post_init__(self):
         if self.precision not in PRECISIONS:
             raise ValueError(f"precision must be one of {PRECISIONS}")
         if type(self.ode_steps) is not int or not MIN_ODE_STEPS <= self.ode_steps <= MAX_ODE_STEPS:
             raise ValueError(f"ode_steps must be an integer in [{MIN_ODE_STEPS}, {MAX_ODE_STEPS}]")
+        object.__setattr__(self, "loras", normalise_loras(self.loras))
 
     @property
     def build_key(self) -> tuple:
@@ -174,6 +224,7 @@ def resolve_preset(
     *,
     memory_budget_gib: float = DEFAULT_MEMORY_BUDGET_GIB,
     require_ac: bool = DEFAULT_REQUIRE_AC,
+    loras=None,
 ) -> EngineOptions:
     preset = PRESETS.get(name)
     if preset is None:
@@ -190,6 +241,7 @@ def resolve_preset(
         memory_budget_gib=float(memory_budget_gib),
         require_ac=bool(require_ac),
         preset=preset.name,
+        loras=normalise_loras(loras),
     )
 
 
@@ -214,6 +266,23 @@ def models_available(paths: Paths | None = None) -> dict:
         "vae": (vae / "config.json").is_file() and (vae / "model.safetensors").is_file(),
         "precisions": [p for p in PRECISIONS if (converted / f"ar-{p}.safetensors").is_file()],
     }
+
+
+def loras_dir_for(paths: Paths | None = None) -> Path:
+    return LORAS_DIR if paths is None else paths.loras_dir
+
+
+def hum_available(paths: Paths | None = None) -> dict:
+    """Whether hum-to-song can run: the cover prerequisites plus librosa (pitch tracking).
+
+    ``find_spec`` keeps librosa (and its numba JIT) out of the HTTP process; only the worker imports it.
+    """
+    import importlib.util
+
+    info = cover_available(paths)
+    info["librosa"] = importlib.util.find_spec("librosa") is not None
+    info["available"] = bool(info["available"] and info["librosa"])
+    return info
 
 
 def cover_available(paths: Paths | None = None) -> dict:

@@ -32,7 +32,8 @@ class Harness:
         self.worker = Worker(self.store, engine, self.paths, self.bus, fake=True)
 
     def submit(self, body):
-        sub = jobs.submit(self.store, body, upload_lookup=lambda uid: {"filename": "demo.mp3"})
+        sub = jobs.submit(self.store, body, upload_lookup=lambda uid: {"filename": "demo.mp3"},
+                          hum_adapter_lookup=lambda name: name == "hum_v1")
         for job in sub.jobs:
             self.worker.submit(job.id)
         return sub.jobs[0] if sub.group is None else sub.jobs
@@ -65,7 +66,8 @@ async def test_create_job_runs_to_done_with_normalised_events(harness):
     events, done = await harness.collect(job.id)
     harness.bus.unsubscribe(job.id, q)
     assert done["status"] == "done" and done["id"] == job.id
-    assert done["artifacts"] == {"audio": True, "score": True, "plan": True, "transcription": False}
+    assert done["artifacts"] == {"audio": True, "score": True, "plan": True, "transcription": False,
+                                 "hum": False}
     assert done["progress"]["type"] == "status" and done["progress"]["status"] == "done"
     assert done["started_at"] and done["finished_at"] and done["error"] is None and done["position"] is None
     timing = done["timing"]
@@ -184,6 +186,30 @@ async def test_regenerate_uses_parent_abc(harness):
     assert done["timing"]["abc_tps"] is None
 
 
+async def test_hum_job(harness):
+    upload = harness.paths.uploads_dir / "u2.webm"
+    upload.write_bytes(b"not really audio")
+    job = harness.submit({"kind": "hum", "params": {"upload_id": "u2", "style": "lo-fi", "lyrics": "la",
+                                                    "adapter": "hum_v1", "hum_influence": 1.2}})
+    events, done = await harness.collect(job.id)
+    assert done["status"] == "done"
+    assert done["artifacts"] == {"audio": True, "score": True, "plan": True, "transcription": True,
+                                 "hum": True}
+    assert done["timing"]["transcribe"] is not None
+    stages = [e["stage"] for e in events if e["type"] == "stage"]
+    assert stages.index("transcribe") < stages.index("hum") < stages.index("plan")
+    labels = {e["label"] for e in events if e["type"] == "stage"}
+    assert {"Analysing hum", "Encoding hum", "Transcribing audio", "Planning score"} <= labels
+    name, request = harness.engine.calls[-1]
+    assert name == "hum_song" and request["cot"] == "melody" and "abc" not in request
+    partial = [e["text"] for e in events if e["type"] == "abc" and e["partial"]]
+    assert partial and all(t.startswith("X:1\nT:Hum\n") for t in partial)  # the hum's open score leads
+    summary = json.loads((harness.paths.songs_dir / job.id / "summary.json").read_text())
+    assert summary["hum"]["melody"] == "continue" and summary["hum"]["adapter"] == "hum_v1"
+    assert (harness.paths.songs_dir / job.id / "hum" / "hum.abc").is_file()
+    assert (harness.paths.songs_dir / job.id / "hum.json").is_file()
+
+
 async def test_cover_job(harness):
     upload = harness.paths.uploads_dir / "u1.mp3"
     upload.write_bytes(b"not really audio")
@@ -268,6 +294,8 @@ def test_normalise_raw_stage_event():
 
 # Every stage label the engine (mlx-Yue) emits, per docs/API.md §6, with its HTTP stage key and unit.
 UPSTREAM_STAGES = [
+    ("Analysing hum", "hum", None),
+    ("Encoding hum", "hum", "chunks"),
     ("Verifying model files", "load", None),
     ("Loading bf16 AR model", "load", None),
     ("Loading 8bit AR model", "load", None),
@@ -441,5 +469,5 @@ def test_worker_cancel_unknown_job_raises(tmp_path):
     with pytest.raises(jobs.NotFound):
         h.worker.cancel("nope")
     assert h.worker.engine_status() == {"state": "cold", "precision": None, "memory_gib": None,
-                                        "current_job_id": None}
+                                        "current_job_id": None, "loras": []}
     h.store.close()

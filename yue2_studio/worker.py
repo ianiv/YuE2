@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from yue2_studio import config
-from yue2_studio.jobs import Job, JobStore, engine_request, iso
+from yue2_studio.jobs import Job, JobStore, engine_request, hum_options, iso
 
 log = logging.getLogger("yue2_studio.worker")
 
@@ -45,6 +45,10 @@ class Engine(Protocol):
                    options: config.EngineOptions, on_event: Callable[[dict], None] | None = None,
                    cancelled: Callable[[], bool] | None = None) -> dict: ...
 
+    def hum_song(self, audio_path: Path, out_dir: Path, *, request: dict, hum: Any,
+                 options: config.EngineOptions, on_event: Callable[[dict], None] | None = None,
+                 cancelled: Callable[[], bool] | None = None) -> dict: ...
+
     def memory_footprint(self) -> dict: ...
 
     def unload(self) -> None: ...
@@ -60,6 +64,8 @@ EVENT_FIELDS = ("type", "job_id", "ts", "stage", "label", "completed", "total", 
 _STAGE_KEYS = {
     "verifying model files": "load",
     "transcribing audio": "transcribe",
+    "analysing hum": "hum",
+    "encoding hum": "hum",
     "using provided score": "plan",
     "planning score": "plan",
     "generating song": "semantic",
@@ -76,8 +82,8 @@ def stage_key(label: str | None) -> str | None:
     text = label.strip().lower()
     if text in _STAGE_KEYS:
         return _STAGE_KEYS[text]
-    if text.startswith("loading") or text.startswith("verifying"):
-        return "load"
+    if text.startswith(("loading", "verifying", "merging")):
+        return "load"  # LoRA merges are part of bringing the models up
     if "transcri" in text:
         return "transcribe"
     return text.split()[0] if text else None
@@ -270,6 +276,9 @@ class Worker:
         self.memory: dict | None = None
         self._last_memory_sample = 0.0
         self._stopping = False
+        # Housekeeping run on the worker thread after each job has been announced done (never raises
+        # into the loop; e.g. ``uploads.auto_prune``). The engine is idle at that point.
+        self.after_job: Callable[[Job], None] | None = None
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -345,8 +354,10 @@ class Worker:
         if memory and state != "cold":
             used = memory.get("mlx_active_bytes") or memory.get("rss_bytes") or 0
             memory_gib = round(used / 2**30, 2)
+        loras = getattr(self.engine, "loras", None)
         return {"state": state, "precision": precision if state != "cold" else None,
-                "memory_gib": memory_gib, "current_job_id": self.current_job_id}
+                "memory_gib": memory_gib, "current_job_id": self.current_job_id,
+                "loras": list(loras) if loras and state != "cold" else []}
 
     def _sample_memory(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -391,7 +402,8 @@ class Worker:
             self._sample_memory()
 
     def _upload_path(self, upload_id: str) -> Path:
-        matches = sorted(p for p in self.paths.uploads_dir.glob(f"{upload_id}.*") if p.suffix != ".json")
+        matches = sorted(p for p in self.paths.uploads_dir.iterdir()  # exact stem: never a glob
+                         if p.stem == upload_id and p.suffix not in ("", ".json") and p.is_file())
         if not matches:
             raise FileNotFoundError(f"upload {upload_id!r} is missing from {self.paths.uploads_dir}")
         return matches[0]
@@ -413,7 +425,8 @@ class Worker:
         (song_dir / "job.json").write_text(json.dumps({
             "id": job.id, "kind": job.kind, "params": job.params, "preset": options.preset,
             "precision": options.precision, "ode_steps": options.ode_steps, "seed": job.seed,
-            "group_id": job.group_id, "parent_id": job.parent_id, "created_at": job.created_at,
+            "loras": config.loras_to_api(options.loras), "group_id": job.group_id, "parent_id": job.parent_id,
+            "created_at": job.created_at,
         }, ensure_ascii=False, indent=2))
         self._publish(job.id, status_event(job.id, "running", f"{job.kind} job started"))
 
@@ -436,6 +449,10 @@ class Worker:
                 summary = engine.cover_song(audio_path, song_dir, task=job.params.get("task", "melody-full"),
                                             request=request, options=options, on_event=on_event,
                                             cancelled=cancel.is_set)
+            elif job.kind == "hum":
+                audio_path = self._upload_path(job.params["upload_id"])
+                summary = engine.hum_song(audio_path, song_dir, request=request, hum=hum_options(job),
+                                          options=options, on_event=on_event, cancelled=cancel.is_set)
             else:
                 summary = engine.create_song(request, song_dir, options=options, on_event=on_event,
                                              cancelled=cancel.is_set)
@@ -474,6 +491,11 @@ class Worker:
             self.bus.done(job.id, self.store.get(job.id).to_api())
         except Exception:  # job deleted meanwhile
             log.debug("job %s vanished before done could be announced", job.id)
+        if self.after_job is not None:
+            try:
+                self.after_job(job)
+            except Exception:  # pragma: no cover - defensive
+                log.exception("worker: after_job hook failed")
 
     # -- housekeeping used by the API ----------------------------------------------------------
 

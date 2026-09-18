@@ -26,12 +26,13 @@ def test_create_job_fills_defaults_and_api_shape(store):
                           "title": None}
     api = job.to_api()
     expected_keys = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps",
-                     "seed", "params", "title", "created_at", "started_at", "finished_at", "error", "timing",
-                     "truncated", "progress", "artifacts", "position", "seq"}
+                     "loras", "seed", "params", "title", "created_at", "started_at", "finished_at", "error",
+                     "timing", "truncated", "progress", "artifacts", "position", "seq"}
     assert set(api) == expected_keys
     assert isinstance(api["seq"], int) and api["seq"] >= 1
     assert api["position"] == 0 and api["title"] is None and api["timing"] is None
-    assert api["artifacts"] == {"audio": False, "score": False, "plan": False, "transcription": False}
+    assert api["artifacts"] == {"audio": False, "score": False, "plan": False, "transcription": False,
+                                "hum": False}
     assert api["created_at"].endswith("Z") and len(api["created_at"]) == 24
 
 
@@ -135,6 +136,42 @@ def test_cover_requires_upload_and_defaults_title(store):
     assert jobs.engine_request(full)["cot"] == "full"
 
 
+def test_hum_submit_defaults_validation_and_engine_request(store):
+    params = {"upload_id": "u1", "style": "lo-fi", "lyrics": "[verse]\nla"}
+    body = {"kind": "hum", "params": params}
+    with pytest.raises(NotFound):
+        jobs.submit(store, body, upload_lookup=lambda uid: None)
+    job = jobs.submit(store, body, upload_lookup=lambda uid: {"filename": "my hum.webm"}).jobs[0]
+    assert job.kind == "hum" and job.title == "my hum"
+    assert set(job.params) == {"upload_id", "style", "lyrics", "seed", "title", "melody", "adapter",
+                               "hum_influence", "offset_s"}
+    assert (job.params["melody"], job.params["adapter"], job.params["hum_influence"],
+            job.params["offset_s"]) == ("continue", None, 1.0, 0.0)
+    assert jobs.engine_request(job) == {"style": "lo-fi", "lyrics": "[verse]\nla", "cot": "melody",
+                                        "seed": job.seed, "id": job.id}
+    options = jobs.hum_options(job)
+    assert options.melody == "continue" and options.adapter is None and options.influence == 1.0
+    # an adapter must be known to the lookup; ignore needs an adapter; ranges are enforced
+    with_adapter = {**params, "adapter": "hum_v1", "melody": "ignore", "hum_influence": 1.5, "offset_s": 2}
+    with pytest.raises(ValidationFailure, match="unknown or unusable hum adapter"):
+        jobs.submit(store, {"kind": "hum", "params": with_adapter},
+                    upload_lookup=lambda uid: {"filename": "a.m4a"})
+    job2 = jobs.submit(store, {"kind": "hum", "params": with_adapter},
+                       upload_lookup=lambda uid: {"filename": "a.m4a"},
+                       hum_adapter_lookup=lambda name: name == "hum_v1").jobs[0]
+    assert jobs.hum_options(job2).to_dict() == {"melody": "ignore", "adapter": "hum_v1", "hum_influence": 1.5,
+                                                "offset_s": 2.0}
+    for bad, message in [
+        ({"melody": "ignore"}, "needs a hum adapter"),
+        ({"melody": "loud"}, "melody"),
+        ({"hum_influence": 5}, "hum_influence"),
+        ({"offset_s": -1}, "offset_s"),
+        ({"adapter": "../x"}, "adapter"),
+    ]:
+        with pytest.raises(ValidationFailure, match=message):
+            jobs.validate_submit({"kind": "hum", "params": {**params, **bad}})
+
+
 def test_list_filters_order_and_total(store):
     ids = [jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0].id for _ in range(5)]
     group = jobs.submit(store, {"kind": "variations", "params": {"count": 2, "base": BASE}})
@@ -184,7 +221,7 @@ def test_delete_removes_group_when_last_member(store):
 def test_settings_defaults_and_partial_update(store):
     assert store.get_settings() == {"default_preset": "quality",
                                     "memory_budget_gib": config.DEFAULT_MEMORY_BUDGET_GIB,
-                                    "require_ac": False, "theme": "system"}
+                                    "require_ac": False, "theme": "system", "prune_uploads_days": None}
     updated = store.update_settings({"theme": "dark", "memory_budget_gib": 20})
     assert updated["theme"] == "dark" and updated["memory_budget_gib"] == 20
     assert updated["default_preset"] == "quality"
@@ -195,6 +232,32 @@ def test_settings_defaults_and_partial_update(store):
         store.update_settings({"theme": "neon"})
     job = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
     assert job.options(store.get_settings()).memory_budget_gib == 20.0
+    assert store.update_settings({"prune_uploads_days": 30})["prune_uploads_days"] == 30
+    assert store.update_settings({"prune_uploads_days": None})["prune_uploads_days"] is None
+    for bad in (0, 366, -1, 2.5, "7d", True):
+        with pytest.raises(ValidationFailure):
+            store.update_settings({"prune_uploads_days": bad})
+
+
+def test_upload_counts_one_query_over_cover_and_hum_jobs(store):
+    lookup = {"filename": "x.wav"}
+    assert store.upload_counts() == {}
+    jobs.submit(store, {"kind": "create", "params": BASE})  # no upload: never counted
+    a = jobs.submit(store, {"kind": "cover", "params": {"upload_id": "u1", "style": "s", "lyrics": "l"}},
+                    upload_lookup=lambda uid: lookup).jobs[0]
+    b = jobs.submit(store, {"kind": "hum", "params": {"upload_id": "u1", "style": "s", "lyrics": "l"}},
+                    upload_lookup=lambda uid: lookup).jobs[0]
+    c = jobs.submit(store, {"kind": "cover", "params": {"upload_id": "u2", "style": "s", "lyrics": "l"}},
+                    upload_lookup=lambda uid: lookup).jobs[0]
+    assert store.upload_counts() == {"u1": {"total": 2, "active": 2}, "u2": {"total": 1, "active": 1}}
+    store.update_status(a.id, "running")
+    store.update_status(b.id, "done")
+    store.update_status(c.id, "failed", error="x")
+    assert store.upload_counts() == {"u1": {"total": 2, "active": 1}, "u2": {"total": 1, "active": 0}}
+    store.update_status(a.id, "cancelled")
+    assert store.upload_counts() == {"u1": {"total": 2, "active": 0}, "u2": {"total": 1, "active": 0}}
+    store.delete(c.id)
+    assert "u2" not in store.upload_counts()
 
 
 def test_iso_timestamps_are_utc_millisecond_z():
@@ -205,7 +268,7 @@ def test_iso_timestamps_are_utc_millisecond_z():
 
 
 def test_artifacts_for_reflects_song_dir(tmp_path):
-    empty = {"audio": False, "score": False, "plan": False, "transcription": False}
+    empty = {"audio": False, "score": False, "plan": False, "transcription": False, "hum": False}
     assert jobs.artifacts_for(tmp_path) == empty
     (tmp_path / "plan").mkdir()
     (tmp_path / "plan" / "score.abc").write_text("X:1")
@@ -215,7 +278,11 @@ def test_artifacts_for_reflects_song_dir(tmp_path):
     (tmp_path / "song" / "audio.flac").write_bytes(b"fLaC")
     (tmp_path / "transcription").mkdir()
     (tmp_path / "transcription" / "score.abc").write_text("X:1")
-    assert jobs.artifacts_for(tmp_path) == {"audio": True, "score": True, "plan": True, "transcription": True}
+    assert jobs.artifacts_for(tmp_path) == {"audio": True, "score": True, "plan": True, "transcription": True,
+                                            "hum": False}
+    (tmp_path / "hum").mkdir()
+    (tmp_path / "hum" / "hum.abc").write_text("X:1\n")
+    assert jobs.artifacts_for(tmp_path)["hum"] is True
 
 
 def test_engine_request_strips_display_fields(store):
