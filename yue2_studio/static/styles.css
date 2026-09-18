@@ -192,3 +192,55 @@ input:disabled, button:disabled { opacity: .55; }
 .meter > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .08s linear; }
 button.recording { background: var(--err); border-color: var(--err); color: #fff; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+/* projects */
+.tag.take-tag { text-transform: none; letter-spacing: 0; }
+.takebanner { padding: 8px 12px; margin-bottom: 14px; border-radius: var(--radius); border: 1px solid var(--accent); background: var(--accent-soft); font-size: 13px; }
+.inline-edit { cursor: text; border-radius: 4px; padding: 0 4px; margin: 0 -4px; }
+.inline-edit:hover { background: var(--surface-2); }
+.inline-edit.placeholder { color: var(--muted); font-style: italic; }
+h1.inline-edit, .inline-input { min-width: 120px; }
+.album-player audio { margin-top: 2px; }
+.album-player .btn.disabled { opacity: .5; cursor: not-allowed; }
+ol.tracklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.track { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.track.dragging { opacity: .45; }
+.track.drop-before::before, .track.drop-after::after { content: ""; position: absolute; left: 8px; right: 8px; height: 3px; border-radius: 2px; background: var(--accent); }
+.track.drop-before::before { top: -7px; } .track.drop-after::after { bottom: -7px; }
+.track.playing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.track-head { gap: 6px; }
+.drag-handle { cursor: grab; color: var(--muted); font-size: 16px; padding: 2px 4px; user-select: none; touch-action: none; }
+.drag-handle:active { cursor: grabbing; }
+.track-n { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; min-width: 28px; }
+button.track-n { padding: 2px 6px; }
+.track-title { flex: 1; min-width: 0; font-weight: 650; font-size: 15px; overflow-wrap: anywhere; }
+.track-title .inline-edit { display: inline-block; max-width: 100%; }
+.track .chosen audio { max-width: 520px; }
+.track details.takes > summary { font-size: 12px; }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.take-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--bg); }
+.take-row.chosen { border-color: var(--ok); }
+.take-row.live { border-style: dashed; }
+.take-row .meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.take-row .meta b { color: var(--text); font-weight: 600; }
+.take-row .title { font-weight: 600; overflow-wrap: anywhere; }
+.take-row audio { max-width: 520px; }
+.take-controls { gap: 8px; }
+.take-controls .note-wrap { flex: 1 1 160px; min-width: 0; }
+.take-controls .note { padding: 3px 8px; font-size: 12px; }
+.take-controls.saving { opacity: .7; }
+.thumb { font-size: 14px; padding: 2px 6px; filter: grayscale(1); opacity: .6; }
+.thumb[aria-pressed="true"] { filter: none; opacity: 1; background: var(--accent-soft); border-color: var(--accent); }
+.stars { display: inline-flex; gap: 0; }
+.stars button { border: 0; background: transparent; color: var(--border-strong); font-size: 18px; line-height: 1; padding: 0 2px; cursor: pointer; }
+.stars button:hover, .stars button.on { color: var(--accent); }
+.stars button:hover ~ button { color: var(--border-strong); }
+button.choose.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+details.menu { position: relative; }
+details.menu > summary { list-style: none; }
+details.menu > summary::-webkit-details-marker { display: none; }
+details[open].menu > summary { margin-bottom: 0; }
+.menu-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 6; min-width: 170px; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); padding: 4px; }
+.menu-list a { padding: 6px 10px; border-radius: 4px; color: var(--text); }
+.menu-list a:hover { background: var(--surface-2); text-decoration: none; }
+.project-picker { flex: 1 1 320px; }

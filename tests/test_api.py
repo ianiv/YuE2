@@ -19,7 +19,7 @@ from yue2_studio.fake import FakeEngine
 
 JOB_KEYS = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps", "loras",
             "seed", "params", "title", "created_at", "started_at", "finished_at", "error", "timing",
-            "truncated", "progress", "artifacts", "position", "seq"}
+            "truncated", "progress", "artifacts", "position", "seq", "take"}
 EVENT_KEYS = {"type", "job_id", "ts", "stage", "label", "completed", "total", "unit", "status", "phase",
               "tokens", "tps", "seconds", "text", "partial", "message"}
 
@@ -1023,6 +1023,305 @@ async def test_restart_requeues_queued_and_fails_stale_running(make_app, home):
         done = await api.wait(queued[1]["id"])
         assert done["status"] == "done"
         assert (await c.get("/api/jobs", params={"status": "queued,running"})).json()["total"] == 0
+
+
+# -- projects / tracks / takes ------------------------------------------------------------------
+
+
+PROJECT_KEYS = {"id", "name", "description", "created_at", "updated_at", "tracks"}
+TRACK_KEYS = {"id", "project_id", "project_name", "name", "position", "chosen_job_id", "created_at", "takes",
+              "chosen"}
+TAKE_KEYS = {"track_id", "project_id", "track_name", "project_name", "thumb", "stars", "note", "added_at",
+             "chosen"}
+
+
+async def _project(client, name="Soundtrack", tracks=("Main theme", "Credits")) -> tuple[dict, list[dict]]:
+    r = await client.post("/api/projects", json={"name": name})
+    assert r.status_code == 201, r.text
+    project = r.json()["project"]
+    made = []
+    for track_name in tracks:
+        r = await client.post(f"/api/projects/{project['id']}/tracks", json={"name": track_name})
+        assert r.status_code == 201, r.text
+        made.append(r.json()["track"])
+    return project, made
+
+
+async def test_projects_crud(client):
+    r = await client.get("/api/projects")
+    assert r.status_code == 200 and r.json() == {"projects": []}
+    r = await client.post("/api/projects", json={"name": " Soundtrack ", "description": "film"})
+    assert r.status_code == 201
+    project = r.json()["project"]
+    assert set(project) == PROJECT_KEYS and project["name"] == "Soundtrack" and project["tracks"] == []
+    for bad in ({}, {"name": ""}, {"name": "x", "description": "y" * 2001}, []):
+        r = await client.post("/api/projects", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
+    r = await client.post("/api/projects", content=b"not json", headers={"content-type": "application/json"})
+    assert r.status_code == 400
+    r = await client.get("/api/projects")
+    listed = r.json()["projects"]
+    assert len(listed) == 1
+    assert set(listed[0]) == (PROJECT_KEYS - {"tracks"}) | {"track_count", "chosen_count"}
+    assert listed[0]["track_count"] == 0 and listed[0]["chosen_count"] == 0
+    r = await client.patch(f"/api/projects/{project['id']}", json={"name": "Score"})
+    assert r.status_code == 200 and r.json()["project"]["name"] == "Score"
+    assert r.json()["project"]["description"] == "film"
+    r = await client.patch(f"/api/projects/{project['id']}", json={"description": ""})
+    assert r.json()["project"] == {**r.json()["project"], "name": "Score", "description": ""}
+    assert (await client.patch(f"/api/projects/{project['id']}", json={"name": ""})).status_code == 400
+    assert (await client.patch("/api/projects/nope", json={"name": "x"})).status_code == 404
+    r = await client.get(f"/api/projects/{project['id']}")
+    assert r.status_code == 200 and r.json()["project"]["name"] == "Score"
+    assert (await client.get("/api/projects/nope")).status_code == 404
+    r = await client.delete(f"/api/projects/{project['id']}")
+    assert r.status_code == 204 and r.content == b""
+    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 404
+    assert (await client.get("/api/projects")).json()["projects"] == []
+
+
+async def test_tracks_create_patch_order_and_delete(client, api):
+    project, (a, b) = await _project(client)
+    assert set(a) == TRACK_KEYS and a["project_id"] == project["id"] and a["project_name"] == "Soundtrack"
+    assert (a["position"], b["position"]) == (0, 1) and a["takes"] == [] and a["chosen"] is None
+    assert (await client.post(f"/api/projects/{project['id']}/tracks", json={"name": " "})).status_code == 400
+    assert (await client.post("/api/projects/nope/tracks", json={"name": "x"})).status_code == 404
+    r = await client.get(f"/api/tracks/{a['id']}")
+    assert r.status_code == 200 and set(r.json()) == {"track", "project"}
+    assert r.json()["project"] == {"id": project["id"], "name": "Soundtrack"}
+    assert (await client.get("/api/tracks/nope")).status_code == 404
+    r = await client.patch(f"/api/tracks/{a['id']}", json={"name": "Theme"})
+    assert r.status_code == 200 and r.json()["track"]["name"] == "Theme"
+    for bad in ({"name": ""}, {"position": -1}, {"position": "x"}):
+        assert (await client.patch(f"/api/tracks/{a['id']}", json=bad)).status_code == 400, bad
+    r = await client.put(f"/api/projects/{project['id']}/order", json={"track_ids": [b["id"], a["id"]]})
+    assert r.status_code == 200
+    assert [t["id"] for t in r.json()["project"]["tracks"]] == [b["id"], a["id"]]
+    assert [t["position"] for t in r.json()["project"]["tracks"]] == [0, 1]
+    for bad in ({"track_ids": [a["id"]]}, {"track_ids": [a["id"], b["id"], "x"]},
+                {"track_ids": [a["id"]] * 2}, {}):
+        r = await client.put(f"/api/projects/{project['id']}/order", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
+    assert (await client.put("/api/projects/nope/order", json={"track_ids": []})).status_code == 404
+    r = await client.patch(f"/api/tracks/{a['id']}", json={"position": 0})
+    assert r.json()["track"]["position"] == 0
+    detail = (await client.get(f"/api/projects/{project['id']}")).json()["project"]
+    assert [t["id"] for t in detail["tracks"]] == [a["id"], b["id"]]
+    listed = (await client.get("/api/projects")).json()["projects"][0]
+    assert listed["track_count"] == 2
+    # delete a track with a take: the job survives, untouched
+    job = await api.create()
+    r = await client.post(f"/api/tracks/{b['id']}/takes", json={"job_ids": [job["id"]]})
+    assert r.status_code == 200
+    r = await client.delete(f"/api/tracks/{b['id']}")
+    assert r.status_code == 204
+    assert (await client.delete(f"/api/tracks/{b['id']}")).status_code == 404
+    assert (await api.get(job["id"]))["take"] is None
+    assert (await client.get("/api/projects")).json()["projects"][0]["track_count"] == 1
+
+
+async def test_attach_detach_rate_and_choose(client, api, app):
+    project, (a, b) = await _project(client)
+    app.state.engine.delay = 0.02  # keep j1/j2 unfinished until the "not done" checks below
+    j1 = await api.create()
+    j2 = await api.create()
+    assert j1["take"] is None
+    r = await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": [j1["id"], "missing"]})
+    assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+    assert (await client.post("/api/tracks/nope/takes", json={"job_ids": [j1["id"]]})).status_code == 404
+    assert (await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": []})).status_code == 400
+    r = await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": [j1["id"], j2["id"]]})
+    assert r.status_code == 200
+    track = r.json()["track"]
+    assert [j["id"] for j in track["takes"]] == [j1["id"], j2["id"]] and track["chosen"] is None
+    assert set(track["takes"][0]) == JOB_KEYS
+    take = (await api.get(j1["id"]))["take"]
+    assert set(take) == TAKE_KEYS
+    assert take["track_id"] == a["id"] and take["project_id"] == project["id"]
+    assert take["track_name"] == "Main theme" and take["project_name"] == "Soundtrack"
+    assert (take["thumb"], take["stars"], take["note"], take["chosen"]) == (None, None, "", False)
+    # library filters
+    r = await client.get("/api/jobs", params={"track": a["id"]})
+    assert r.json()["total"] == 2 and all(j["take"]["track_id"] == a["id"] for j in r.json()["jobs"])
+    assert (await client.get("/api/jobs", params={"project": project["id"]})).json()["total"] == 2
+    assert (await client.get("/api/jobs", params={"track": b["id"]})).json()["total"] == 0
+    # rating
+    r = await client.patch(f"/api/takes/{j1['id']}", json={"thumb": 1, "stars": 4, "note": "keeper"})
+    assert r.status_code == 200 and set(r.json()) == {"job"}
+    take = r.json()["job"]["take"]
+    assert (take["thumb"], take["stars"], take["note"]) == (1, 4, "keeper")
+    r = await client.patch(f"/api/takes/{j1['id']}", json={"thumb": -1})
+    assert r.json()["job"]["take"]["thumb"] == -1 and r.json()["job"]["take"]["stars"] == 4
+    r = await client.patch(f"/api/takes/{j1['id']}", json={"thumb": 0, "stars": None})
+    assert r.json()["job"]["take"]["thumb"] is None and r.json()["job"]["take"]["stars"] is None
+    for bad in ({"stars": 0}, {"stars": 6}, {"thumb": 2}, {"thumb": True}, {"note": "n" * 4001}, []):
+        r = await client.patch(f"/api/takes/{j1['id']}", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
+    r = await client.patch("/api/takes/nope", json={"stars": 3})
+    assert r.status_code == 404
+    unattached = await api.create()
+    assert (await client.patch(f"/api/takes/{unattached['id']}", json={"stars": 3})).status_code == 404
+    # choosing needs a done take of that track
+    r = await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": j2["id"]})  # still queued
+    assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+    app.state.engine.delay = 0
+    await api.wait(j1["id"])
+    await api.wait(j2["id"])
+    r = await client.patch(f"/api/tracks/{b['id']}", json={"chosen_job_id": j1["id"]})
+    assert r.status_code == 409  # not a take of b
+    r = await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": j1["id"]})
+    assert r.status_code == 200
+    track = r.json()["track"]
+    assert track["chosen_job_id"] == j1["id"] and track["chosen"]["id"] == j1["id"]
+    assert track["chosen"]["take"]["chosen"] is True
+    assert (await api.get(j1["id"]))["take"]["chosen"] is True
+    assert (await api.get(j2["id"]))["take"]["chosen"] is False
+    listed = (await client.get("/api/projects")).json()["projects"][0]
+    assert listed["chosen_count"] == 1
+    detail = (await client.get(f"/api/projects/{project['id']}")).json()["project"]
+    assert detail["tracks"][0]["chosen"]["id"] == j1["id"] and len(detail["tracks"][0]["takes"]) == 2
+    r = await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": None})
+    assert r.json()["track"]["chosen"] is None and r.json()["track"]["chosen_job_id"] is None
+    await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": j1["id"]})
+    # 409 for a job in another track, then move keeps its rating and clears the old choice
+    await client.patch(f"/api/takes/{j1['id']}", json={"stars": 5})
+    r = await client.post(f"/api/tracks/{b['id']}/takes", json={"job_ids": [j1["id"]]})
+    assert r.status_code == 409 and "already a take of Main theme" in r.json()["error"]["message"]
+    r = await client.post(f"/api/tracks/{b['id']}/takes", json={"job_ids": [j1["id"]], "move": True})
+    assert r.status_code == 200 and [j["id"] for j in r.json()["track"]["takes"]] == [j1["id"]]
+    take = (await api.get(j1["id"]))["take"]
+    assert take["track_id"] == b["id"] and take["stars"] == 5 and take["chosen"] is False
+    a_now = (await client.get(f"/api/tracks/{a['id']}")).json()["track"]
+    assert a_now["chosen_job_id"] is None and [j["id"] for j in a_now["takes"]] == [j2["id"]]
+    # detach
+    r = await client.delete(f"/api/takes/{j1['id']}")
+    assert r.status_code == 204
+    assert (await client.delete(f"/api/takes/{j1['id']}")).status_code == 404
+    assert (await api.get(j1["id"]))["take"] is None
+    # deleting a chosen job clears the choice
+    await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": j2["id"]})
+    assert (await client.delete(f"/api/jobs/{j2['id']}")).status_code == 204
+    a_now = (await client.get(f"/api/tracks/{a['id']}")).json()["track"]
+    assert a_now["chosen_job_id"] is None and a_now["takes"] == []
+    # deleting the project leaves jobs and song dirs alone
+    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    assert (await api.get(j1["id"]))["artifacts"]["audio"] is True
+
+
+async def test_submit_with_track_id(client, api, app):
+    project, (a, _) = await _project(client)
+    r = await client.post("/api/jobs", json={"kind": "create", "params": BASE, "track_id": "nope"})
+    assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+    assert (await client.get("/api/jobs")).json()["total"] == 0
+    r = await client.post("/api/jobs", json={"kind": "create", "params": BASE, "track_id": a["id"]})
+    assert r.status_code == 201
+    job = r.json()["job"]
+    assert job["take"]["track_id"] == a["id"] and job["take"]["track_name"] == "Main theme"
+    r = await client.post("/api/jobs", json={"kind": "variations", "track_id": a["id"],
+                                             "params": {"count": 2, "base": BASE}})
+    assert r.status_code == 201
+    members = r.json()["jobs"]
+    assert all(j["take"]["track_id"] == a["id"] for j in members)
+    track = (await client.get(f"/api/tracks/{a['id']}")).json()["track"]
+    assert [j["id"] for j in track["takes"]] == [job["id"], *(j["id"] for j in members)]
+    # live progress overlays on takes while they run
+    app.state.engine.delay = 0.02
+    r = await client.post("/api/jobs", json={"kind": "create", "params": BASE, "track_id": a["id"]})
+    live = r.json()["job"]
+    await api.wait_status(live["id"], "running")
+    track = (await client.get(f"/api/tracks/{a['id']}")).json()["track"]
+    running = next(j for j in track["takes"] if j["id"] == live["id"])
+    assert running["status"] == "running" and running["progress"] is not None
+    app.state.engine.delay = 0
+    await api.wait(live["id"])
+    # regenerate can target the parent's track explicitly; a plain submit is never attached
+    parent = await api.wait(job["id"])
+    r = await client.post("/api/jobs", json={"kind": "regenerate", "track_id": a["id"],
+                                             "params": {"parent_id": parent["id"], "abc": "X:1\nK:C\nC|"}})
+    assert r.status_code == 201 and r.json()["job"]["take"]["track_id"] == a["id"]
+    plain = await api.create()
+    assert plain["take"] is None
+
+
+async def test_album_zip_flac(client, api, app):
+    project, (a, b) = await _project(client, name="My Album: Vol. 1/2")
+    r = await client.get(f"/api/projects/{project['id']}/album.zip")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+    assert (await client.get("/api/projects/nope/album.zip")).status_code == 404
+    r = await client.get(f"/api/projects/{project['id']}/album.zip", params={"format": "wav"})
+    assert r.status_code == 400
+    job = await api.create({**BASE, "title": "Opening"})
+    await api.wait(job["id"])
+    await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": [job["id"]]})
+    await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": job["id"]})
+    r = await client.get(f"/api/projects/{project['id']}/album.zip")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    disposition = r.headers["content-disposition"]  # starlette RFC 5987-encodes names with spaces
+    assert disposition.startswith("attachment;") and "My%20Album%20Vol.%201%202.zip" in disposition
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = zf.namelist()
+    slug = "My Album Vol. 1 2"
+    assert names == [f"{slug}/01 Main theme.flac", f"{slug}/tracklist.json", f"{slug}/tracklist.md"]
+    assert zf.read(f"{slug}/01 Main theme.flac")[:4] == b"fLaC"
+    assert zf.getinfo(f"{slug}/01 Main theme.flac").compress_type == zipfile.ZIP_STORED
+    data = json.loads(zf.read(f"{slug}/tracklist.json"))
+    assert set(data) == {"project", "format", "generated_at", "tracks"} and data["format"] == "flac"
+    assert data["project"] == {"id": project["id"], "name": "My Album: Vol. 1/2", "description": ""}
+    first, second = data["tracks"]
+    assert set(first) == {"n", "track_id", "name", "job_id", "title", "file", "seconds", "seed", "preset",
+                          "kind", "missing"}
+    assert first["n"] == 1 and first["job_id"] == job["id"] and first["title"] == "Opening"
+    assert first["file"] == "01 Main theme.flac" and first["missing"] is False and first["kind"] == "create"
+    assert first["seed"] == BASE["seed"] and first["preset"] == "quality"
+    assert second == {"n": 2, "track_id": b["id"], "name": "Credits", "job_id": None, "title": None,
+                      "file": None, "seconds": None, "seed": None, "preset": None, "kind": None,
+                      "missing": True}
+    md = zf.read(f"{slug}/tracklist.md").decode()
+    assert md.startswith("# My Album: Vol. 1/2") and "01 Main theme.flac" in md and "Credits" in md
+    assert not list(app.state.paths.data_dir.glob(".album-*"))  # temp file removed after sending
+    # a chosen take whose audio is gone counts as missing (409 when it was the only one)
+    (app.state.paths.songs_dir / job["id"] / "song" / "audio.flac").unlink()
+    r = await client.get(f"/api/projects/{project['id']}/album.zip")
+    assert r.status_code == 409
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+async def test_album_zip_mp3(client, api, app):
+    project, (a, _) = await _project(client, name="Album")
+    job = await api.create()
+    await api.wait(job["id"])
+    await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": [job["id"]]})
+    await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": job["id"]})
+    r = await client.get(f"/api/projects/{project['id']}/album.zip", params={"format": "mp3"})
+    assert r.status_code == 200 and r.headers["content-disposition"] == 'attachment; filename="Album.zip"'
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert "Album/01 Main theme.mp3" in zf.namelist() and len(zf.read("Album/01 Main theme.mp3")) > 1000
+    assert json.loads(zf.read("Album/tracklist.json"))["format"] == "mp3"
+    assert (app.state.paths.songs_dir / job["id"] / "song" / "audio.mp3").is_file()  # cached beside the flac
+
+
+async def test_startup_sweeps_stale_album_zips(make_app, home):
+    data_dir = home / "data"
+    data_dir.mkdir(parents=True)
+    stale = data_dir / ".album-abc123.zip"
+    stale.write_bytes(b"PK")
+    keep = data_dir / "app.db-keep.zip"
+    keep.write_bytes(b"PK")
+    async with make_app(FakeEngine(delay=0), home=home) as (app, client):
+        assert not stale.exists() and keep.exists()
+        assert (await client.get("/api/status")).status_code == 200
+
+
+async def test_album_zip_mp3_503_without_ffmpeg(client, api, monkeypatch):
+    project, (a, _) = await _project(client)
+    job = await api.create()
+    await api.wait(job["id"])
+    await client.post(f"/api/tracks/{a['id']}/takes", json={"job_ids": [job["id"]]})
+    await client.patch(f"/api/tracks/{a['id']}", json={"chosen_job_id": job["id"]})
+    monkeypatch.setattr(audio, "ffmpeg_path", lambda: None)
+    r = await client.get(f"/api/projects/{project['id']}/album.zip", params={"format": "mp3"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "engine_unavailable"
+    assert (await client.get(f"/api/projects/{project['id']}/album.zip")).status_code == 200  # flac is fine
 
 
 # -- static / SPA -------------------------------------------------------------------------------

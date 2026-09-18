@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import uuid
 import wave
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,9 @@ STAGES = [
 JOBS: dict[str, dict] = {}
 GROUPS: dict[str, dict] = {}
 UPLOADS: dict[str, dict] = {}
+PROJECTS: dict[str, dict] = {}  # id -> {id, name, description, created_at, updated_at}
+TRACKS: dict[str, dict] = {}  # id -> {id, project_id, name, position, chosen_job_id, created_at}
+TAKES: dict[str, dict] = {}  # job_id -> {track_id, thumb, stars, note, added_at}
 SUBS: dict[str, list[asyncio.Queue]] = {}
 SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system",
             "prune_uploads_days": None}
@@ -183,7 +187,20 @@ def public(job: dict) -> dict:
         j["id"] for j in sorted(JOBS.values(), key=lambda j: j["created_at"]) if j["status"] == "queued"
     ]
     out["position"] = queued.index(job["id"]) if job["status"] == "queued" else None
+    out["take"] = _take_of(job["id"])
     return out
+
+
+def _take_of(job_id: str) -> dict | None:
+    take = TAKES.get(job_id)
+    if take is None:
+        return None
+    track = TRACKS.get(take["track_id"]) or {}
+    project = PROJECTS.get(track.get("project_id")) or {}
+    return {"track_id": take["track_id"], "project_id": track.get("project_id"),
+            "track_name": track.get("name"), "project_name": project.get("name"),
+            "thumb": take["thumb"], "stars": take["stars"], "note": take["note"],
+            "added_at": take["added_at"], "chosen": track.get("chosen_job_id") == job_id}
 
 
 async def run_job(job: dict) -> None:
@@ -335,6 +352,9 @@ async def post_job(req: Request):
     loras = _loras(body)
     if isinstance(loras, JSONResponse):
         return loras
+    track_id = body.get("track_id") or None
+    if track_id is not None and track_id not in TRACKS:
+        return err(404, "not_found", "unknown track_id")
     if kind == "variations":
         base, count = params.get("base") or {}, params.get("count")
         if (
@@ -356,6 +376,8 @@ async def post_job(req: Request):
             jobs.append(j)
             await asyncio.sleep(0.001)  # distinct created_at ordering
         GROUPS[gid] = {"id": gid, "label": label, "created_at": now(), "job_ids": [j["id"] for j in jobs]}
+        if track_id:
+            _attach(track_id, [j["id"] for j in jobs])
         return JSONResponse({"group": GROUPS[gid], "jobs": [public(j) for j in jobs]}, status_code=201)
     if kind == "create":
         if not params.get("style") or not params.get("lyrics"):
@@ -395,11 +417,14 @@ async def post_job(req: Request):
     job = new_job(kind, params, preset, precision, ode, loras)
     job["parent_id"] = params.get("parent_id")
     JOBS[job["id"]] = job
+    if track_id:
+        _attach(track_id, [job["id"]])
     return JSONResponse({"job": public(job)}, status_code=201)
 
 
 @app.get("/api/jobs")
-def list_jobs(status: str = "", group: str = "", kind: str = "", limit: int = 50, offset: int = 0) -> dict:
+def list_jobs(status: str = "", group: str = "", kind: str = "", track: str = "", project: str = "",
+              limit: int = 50, offset: int = 0) -> dict:
     jobs = sorted(JOBS.values(), key=lambda j: j["created_at"], reverse=True)
     if status:
         jobs = [j for j in jobs if j["status"] in status.split(",")]
@@ -407,6 +432,11 @@ def list_jobs(status: str = "", group: str = "", kind: str = "", limit: int = 50
         jobs = [j for j in jobs if j["kind"] in kind.split(",")]
     if group:
         jobs = [j for j in jobs if j["group_id"] == group]
+    if track:
+        jobs = [j for j in jobs if j["id"] in TAKES and TAKES[j["id"]]["track_id"] == track]
+    if project:
+        jobs = [j for j in jobs if j["id"] in TAKES
+                and TRACKS.get(TAKES[j["id"]]["track_id"], {}).get("project_id") == project]
     return {"jobs": [public(j) for j in jobs[offset : offset + min(limit, 500)]], "total": len(jobs)}
 
 
@@ -422,6 +452,7 @@ def delete_job(jid: str):
     if JOBS[jid]["status"] == "running":
         return err(409, "conflict", "job is running; cancel it first")
     JOBS.pop(jid)
+    _detach(jid)
     return Response(status_code=204)
 
 
@@ -492,6 +523,299 @@ def song_file(jid: str, path: str):
             headers={"Content-Disposition": f'attachment; filename="{jid}.zip"'},
         )
     return err(404, "not_found", "no such artifact")
+
+
+# -- projects / tracks / takes ---------------------------------------------------------------------
+
+
+def _project_tracks(pid: str) -> list[dict]:
+    return sorted((t for t in TRACKS.values() if t["project_id"] == pid), key=lambda t: t["position"])
+
+
+def _track_takes(tid: str) -> list[dict]:
+    items = [(jid, t) for jid, t in TAKES.items() if t["track_id"] == tid and jid in JOBS]
+    return [public(JOBS[jid]) for jid, _ in sorted(items, key=lambda item: item[1]["added_at"])]
+
+
+def _track_json(tid: str) -> dict:
+    t = TRACKS[tid]
+    takes = _track_takes(tid)
+    chosen = next((j for j in takes if j["id"] == t["chosen_job_id"]), None)
+    return {**t, "project_name": PROJECTS[t["project_id"]]["name"], "takes": takes, "chosen": chosen}
+
+
+def _project_json(pid: str) -> dict:
+    return {**PROJECTS[pid], "tracks": [_track_json(t["id"]) for t in _project_tracks(pid)]}
+
+
+def _touch(pid: str | None) -> None:
+    if pid in PROJECTS:
+        PROJECTS[pid]["updated_at"] = now()
+
+
+def _repack(pid: str) -> None:
+    for i, t in enumerate(_project_tracks(pid)):
+        t["position"] = i
+
+
+def _detach(jid: str) -> None:
+    take = TAKES.pop(jid, None)
+    if take is None:
+        return
+    for t in TRACKS.values():
+        if t["chosen_job_id"] == jid:
+            t["chosen_job_id"] = None
+    _touch(TRACKS.get(take["track_id"], {}).get("project_id"))
+
+
+def _attach(tid: str, job_ids: list[str], move: bool = False):
+    for jid in job_ids:
+        if jid not in JOBS:
+            return err(404, "not_found", f"job {jid!r} not found")
+        current = TAKES.get(jid)
+        if current and current["track_id"] != tid and not move:
+            where = TRACKS[current["track_id"]]["name"]
+            return err(409, "conflict", f"job {jid!r} is already a take of {where}")
+    for jid in job_ids:
+        current = TAKES.get(jid)
+        if current is None:
+            TAKES[jid] = {"track_id": tid, "thumb": None, "stars": None, "note": "", "added_at": now()}
+        elif current["track_id"] != tid:
+            for t in TRACKS.values():
+                if t["chosen_job_id"] == jid:
+                    t["chosen_job_id"] = None
+            current.update(track_id=tid, added_at=now())
+    _touch(TRACKS[tid]["project_id"])
+    return None
+
+
+def _name(body: dict, required: bool = True):
+    name = body.get("name")
+    if name is None and not required:
+        return None
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 200:
+        return err(400, "validation_error", "name must be a non-empty string of at most 200 characters")
+    return " ".join(name.split())
+
+
+@app.get("/api/projects")
+def list_projects() -> dict:
+    items = []
+    for p in sorted(PROJECTS.values(), key=lambda p: p["updated_at"], reverse=True):
+        tracks = _project_tracks(p["id"])
+        items.append({**p, "track_count": len(tracks),
+                      "chosen_count": sum(t["chosen_job_id"] is not None for t in tracks)})
+    return {"projects": items}
+
+
+@app.post("/api/projects")
+async def post_project(req: Request):
+    body = await req.json()
+    name = _name(body)
+    if isinstance(name, JSONResponse):
+        return name
+    description = body.get("description") or ""
+    if not isinstance(description, str) or len(description) > 2000:
+        return err(400, "validation_error", "description must be a string of at most 2000 characters")
+    pid = uuid.uuid4().hex
+    PROJECTS[pid] = {"id": pid, "name": name, "description": description, "created_at": now(),
+                     "updated_at": now()}
+    return JSONResponse({"project": _project_json(pid)}, status_code=201)
+
+
+@app.get("/api/projects/{pid}")
+def get_project(pid: str):
+    return {"project": _project_json(pid)} if pid in PROJECTS else err(404, "not_found", "unknown project")
+
+
+@app.patch("/api/projects/{pid}")
+async def patch_project(pid: str, req: Request):
+    if pid not in PROJECTS:
+        return err(404, "not_found", "unknown project")
+    body = await req.json()
+    name = _name(body, required=False)
+    if isinstance(name, JSONResponse):
+        return name
+    if name is not None:
+        PROJECTS[pid]["name"] = name
+    if "description" in body:
+        PROJECTS[pid]["description"] = body["description"] or ""
+    _touch(pid)
+    return {"project": _project_json(pid)}
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    if pid not in PROJECTS:
+        return err(404, "not_found", "unknown project")
+    for t in _project_tracks(pid):
+        for jid in [jid for jid, take in TAKES.items() if take["track_id"] == t["id"]]:
+            del TAKES[jid]
+        del TRACKS[t["id"]]
+    del PROJECTS[pid]
+    return Response(status_code=204)
+
+
+@app.post("/api/projects/{pid}/tracks")
+async def post_track(pid: str, req: Request):
+    if pid not in PROJECTS:
+        return err(404, "not_found", "unknown project")
+    name = _name(await req.json())
+    if isinstance(name, JSONResponse):
+        return name
+    tid = uuid.uuid4().hex
+    TRACKS[tid] = {"id": tid, "project_id": pid, "name": name, "position": len(_project_tracks(pid)),
+                   "chosen_job_id": None, "created_at": now()}
+    _touch(pid)
+    return JSONResponse({"track": _track_json(tid)}, status_code=201)
+
+
+@app.put("/api/projects/{pid}/order")
+async def put_order(pid: str, req: Request):
+    if pid not in PROJECTS:
+        return err(404, "not_found", "unknown project")
+    ids = (await req.json()).get("track_ids")
+    current = [t["id"] for t in _project_tracks(pid)]
+    if not isinstance(ids, list) or len(ids) != len(set(ids)) or set(ids) != set(current):
+        return err(400, "validation_error", "track_ids must list every track of the project exactly once")
+    for i, tid in enumerate(ids):
+        TRACKS[tid]["position"] = i
+    _touch(pid)
+    return {"project": _project_json(pid)}
+
+
+@app.get("/api/projects/{pid}/album.zip")
+def album_zip(pid: str, format: str = "flac"):
+    if pid not in PROJECTS:
+        return err(404, "not_found", "unknown project")
+    if format not in ("flac", "mp3"):
+        return err(400, "validation_error", "format must be flac or mp3")
+    if format == "mp3" and AUDIO_TYPE != "audio/flac":
+        return err(503, "engine_unavailable", "ffmpeg is not installed; MP3 export unavailable")
+    project = _project_json(pid)
+    slug = "".join(c if c not in '\\/:*?"<>|' else " " for c in project["name"]).strip() or "album"
+    tracks, exportable = [], 0
+    for n, t in enumerate(project["tracks"], start=1):
+        job = t["chosen"]
+        missing = job is None or not job["artifacts"]["audio"]
+        exportable += not missing
+        tracks.append({"n": n, "track_id": t["id"], "name": t["name"], "job_id": job and job["id"],
+                       "title": job and job["title"],
+                       "file": None if missing else f"{n:02d} {t['name']}.{format}",
+                       "seconds": job and (job["timing"] or {}).get("audio_seconds"),
+                       "seed": job and job["seed"], "preset": job and job["preset"],
+                       "kind": job and job["kind"], "missing": missing})
+    if not exportable:
+        return err(409, "conflict", "no track has a finished take with audio to export")
+    data = {"project": {"id": pid, "name": project["name"], "description": project["description"]},
+            "format": format, "generated_at": now(), "tracks": tracks}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for t in tracks:
+            if not t["missing"]:
+                zf.writestr(f"{slug}/{t['file']}", AUDIO)
+        zf.writestr(f"{slug}/tracklist.json", json.dumps(data, indent=2))
+        md = [f"# {project['name']}", ""]
+        md += [f"{t['n']}. {t['name']} — {t['file'] or 'missing'}" for t in tracks]
+        zf.writestr(f"{slug}/tracklist.md", "\n".join(md) + "\n")
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{slug}.zip"'})
+
+
+@app.get("/api/tracks/{tid}")
+def get_track(tid: str):
+    if tid not in TRACKS:
+        return err(404, "not_found", "unknown track")
+    p = PROJECTS[TRACKS[tid]["project_id"]]
+    return {"track": _track_json(tid), "project": {"id": p["id"], "name": p["name"]}}
+
+
+@app.patch("/api/tracks/{tid}")
+async def patch_track(tid: str, req: Request):
+    if tid not in TRACKS:
+        return err(404, "not_found", "unknown track")
+    body, t = await req.json(), TRACKS[tid]
+    name = _name(body, required=False)
+    if isinstance(name, JSONResponse):
+        return name
+    if name is not None:
+        t["name"] = name
+    if "chosen_job_id" in body:
+        jid = body["chosen_job_id"]
+        if jid is not None:
+            take = TAKES.get(jid)
+            if take is None or take["track_id"] != tid:
+                return err(409, "conflict", "job is not a take of this track")
+            if JOBS[jid]["status"] != "done":
+                return err(409, "conflict", "only a finished take can be chosen")
+        t["chosen_job_id"] = jid
+    if "position" in body:
+        pos = body["position"]
+        if not isinstance(pos, int) or isinstance(pos, bool) or pos < 0:
+            return err(400, "validation_error", "position must be an integer >= 0")
+        others = [x for x in _project_tracks(t["project_id"]) if x["id"] != tid]
+        others.insert(min(pos, len(others)), t)
+        for i, x in enumerate(others):
+            x["position"] = i
+    _touch(t["project_id"])
+    return {"track": _track_json(tid)}
+
+
+@app.delete("/api/tracks/{tid}")
+def delete_track(tid: str):
+    if tid not in TRACKS:
+        return err(404, "not_found", "unknown track")
+    for jid in [jid for jid, take in TAKES.items() if take["track_id"] == tid]:
+        del TAKES[jid]
+    pid = TRACKS.pop(tid)["project_id"]
+    _repack(pid)
+    _touch(pid)
+    return Response(status_code=204)
+
+
+@app.post("/api/tracks/{tid}/takes")
+async def post_takes(tid: str, req: Request):
+    if tid not in TRACKS:
+        return err(404, "not_found", "unknown track")
+    body = await req.json()
+    ids = body.get("job_ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
+        return err(400, "validation_error", "job_ids must be a non-empty list of job ids")
+    failure = _attach(tid, list(dict.fromkeys(ids)), move=bool(body.get("move")))
+    return failure if failure is not None else {"track": _track_json(tid)}
+
+
+@app.delete("/api/takes/{jid}")
+def delete_take(jid: str):
+    if jid not in TAKES:
+        return err(404, "not_found", "job is not a take")
+    _detach(jid)
+    return Response(status_code=204)
+
+
+@app.patch("/api/takes/{jid}")
+async def patch_take(jid: str, req: Request):
+    take = TAKES.get(jid)
+    if take is None or jid not in JOBS:
+        return err(404, "not_found", "job is not a take")
+    body = await req.json()
+    if "thumb" in body:
+        if body["thumb"] not in (None, -1, 0, 1) or isinstance(body["thumb"], bool):
+            return err(400, "validation_error", "thumb must be -1, 0, 1 or null")
+        take["thumb"] = body["thumb"] or None
+    if "stars" in body:
+        stars = body["stars"]
+        bad_stars = not isinstance(stars, int) or isinstance(stars, bool) or not 1 <= stars <= 5
+        if stars is not None and bad_stars:
+            return err(400, "validation_error", "stars must be 1..5 or null")
+        take["stars"] = stars
+    if "note" in body:
+        note = body["note"] or ""
+        if not isinstance(note, str) or len(note) > 4000:
+            return err(400, "validation_error", "note must be a string of at most 4000 characters")
+        take["note"] = note
+    _touch(TRACKS[take["track_id"]]["project_id"])
+    return {"job": public(JOBS[jid])}
 
 
 @app.post("/api/upload")

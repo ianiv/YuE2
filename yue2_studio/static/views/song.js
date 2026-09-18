@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, loraLabel, loraPicker, presetPicker, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, jobTitle, loraLabel, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
 
 export async function songView({ el, param, app }) {
   let job;
@@ -37,8 +37,8 @@ export async function songView({ el, param, app }) {
     try {
       // RegenerateParams: seed null = inherit parent, so a random seed must be rolled client-side.
       const style = styleIn.value.trim(), seed = seedIn.isRandom() ? randomSeed() : seedIn.value();
-      await api.submit({ kind: "regenerate", ...presets.value(), loras: loras.value(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
-      toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = "#/queue";
+      await api.submit({ kind: "regenerate", ...presets.value(), loras: loras.value(), track_id: trackId(), params: { parent_id: job.id, abc: text, style: style && style !== p.style ? style : null, lyrics: null, seed: seed !== null && seed !== job.seed ? seed : null, title: null } });
+      toast(`Queued regeneration of “${jobTitle(job)}”`, "ok"); player.stop(); location.hash = afterSubmit();
     } catch (e) { toastError(e); regenBtn.disabled = false; }
   }
   async function variations() {
@@ -51,15 +51,55 @@ export async function songView({ el, param, app }) {
         : job.kind === "hum"
           ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: null, abc: abc || null, title: p.title || null } // variations keep the continued score
           : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
-      const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: loras.value(), params: { count, base, random_seeds: false, label: null } });
+      const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: loras.value(), track_id: trackId(), params: { count, base, random_seeds: false, label: null } });
       rememberGroup(r.group, r.jobs);
-      toast(`Queued ${count} variations`, "ok"); location.hash = "#/queue";
+      toast(`Queued ${count} variations`, "ok"); location.hash = afterSubmit();
     } catch (e) { toastError(e); varBtn.disabled = false; }
   }
   async function remove() {
     if (!confirmDialog(`Delete “${jobTitle(job)}” and its files?`)) return;
     try { await api.remove(job.id); toast("Deleted", "ok"); location.hash = "#/library"; } catch (e) { toastError(e); }
   }
+
+  // -- project membership: new takes made from a take land in the same track; the panel attaches/rates/chooses/detaches.
+  const trackId = () => (job.take ? job.take.track_id : null);
+  const afterSubmit = () => (job.take ? `#/project/${job.take.project_id}` : "#/queue");
+  const headTag = h("span", { class: "row", style: "gap:4px" });
+  const projectPanel = h("div", { class: "panel stack", id: "s-project" });
+  function paintProject() {
+    fill(headTag, projectTag(job));
+    const t = job.take;
+    if (!t) {
+      const picker = projectPicker({ onPick: () => { addBtn.disabled = !picker.value(); } });
+      const addBtn = h("button", { class: "primary sm", disabled: true, onclick: () => attach(picker.value()) }, "Add as a take");
+      fill(projectPanel, h("h3", {}, "Project"), h("p", { class: "hint" }, "Add this song to a project track as a take; rate it and choose it as the track's final take."), picker, h("div", {}, addBtn));
+      return;
+    }
+    const canChoose = job.status === "done" && job.artifacts.audio;
+    const chooseBtn = t.chosen
+      ? h("button", { class: "sm choose on", "aria-pressed": "true", title: "Unchoose", onclick: () => choose(null) }, "★ Chosen take")
+      : h("button", { class: "sm choose", "aria-pressed": "false", disabled: !canChoose, title: canChoose ? "Use this take on the album" : "Only a finished take with audio can be chosen", onclick: () => choose(job.id) }, "☆ Choose as final take");
+    fill(projectPanel, h("h3", {}, "Project"),
+      h("p", {}, h("a", { href: `#/project/${t.project_id}` }, t.project_name), h("span", { class: "muted" }, " › "), t.track_name, t.chosen ? h("span", { class: "tag ok", style: "margin-left:6px" }, "chosen") : null),
+      takeControls(job, { onChange: (j) => { job = j; } }),
+      h("div", { class: "row" }, chooseBtn, h("span", { class: "spacer" }), h("button", { class: "ghost sm", onclick: detach }, "Detach")));
+  }
+  async function attach(target) {
+    if (!target) return;
+    try {
+      try { await api.attachTakes(target.id, [job.id]); }
+      catch (e) { if (e.status !== 409 || !confirmDialog(`${e.message}. Move it to “${target.name}”?`)) throw e; await api.attachTakes(target.id, [job.id], true); }
+      await reloadJob(); toast(`Added to ${target.project_name} › ${target.name}`, "ok");
+    } catch (e) { toastError(e); }
+  }
+  async function choose(id) {
+    try { await api.patchTrack(job.take.track_id, { chosen_job_id: id }); await reloadJob(); } catch (e) { toastError(e); }
+  }
+  async function detach() {
+    if (!confirmDialog(`Remove “${jobTitle(job)}” from “${job.take.track_name}”? The song is kept; its rating is dropped.`)) return;
+    try { await api.detachTake(job.id); await reloadJob(); } catch (e) { toastError(e); }
+  }
+  async function reloadJob() { ({ job } = await api.job(job.id)); paintProject(); }
 
   const stageKeys = ["load", "transcribe", "hum", "plan", "semantic", "synthesize", "decode", "save", "e2e"].filter((k) => t[k] !== undefined && t[k] !== null);
   const timingTable = stageKeys.length ? h("div", { class: "table-wrap" }, h("table", {},
@@ -72,7 +112,7 @@ export async function songView({ el, param, app }) {
 
   fill(el,
     h("div", { class: "view-head" }, h("h1", {}, jobTitle(job)), h("span", { class: "tag" }, job.kind), h("span", { class: `tag ${job.status === "done" ? "ok" : "err"}` }, job.status),
-      job.group_id ? h("a", { class: "tag accent", href: `#/library?group=${job.group_id}` }, "group") : null, job.parent_id ? h("a", { class: "tag", href: `#/song/${job.parent_id}` }, "parent") : null,
+      job.group_id ? h("a", { class: "tag accent", href: `#/library?group=${job.group_id}` }, "group") : null, job.parent_id ? h("a", { class: "tag", href: `#/song/${job.parent_id}` }, "parent") : null, headTag,
       h("span", { class: "spacer" }), h("a", { class: "btn ghost sm", href: "#/library" }, "← Library")),
     job.status === "failed" ? h("div", { class: "errbox mono", style: "margin-bottom:14px" }, job.error || "failed") : null,
     job.truncated ? h("div", { class: "warnbox", style: "margin-bottom:14px" }, h("b", {}, "Truncated"), ` during ${job.truncated.phase}: ${job.truncated.reason}. The song may end early — try a shorter lyric or mode melody.`) : null,
@@ -96,6 +136,7 @@ export async function songView({ el, param, app }) {
         transcription ? h("section", { class: "stack" }, h("h3", {}, "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null,
         humAbc ? h("section", { class: "stack" }, h("h3", {}, p.melody === "continue" ? "Your hum (the open score the planner continued)" : "Your hum (transcribed)"), (() => { const s = h("div", { class: "score" }); renderScore(s, humAbc); return s; })(), h("details", {}, h("summary", {}, "hum/hum.abc"), h("pre", { class: "block mono" }, humAbc))) : null),
       h("div", { class: "stack" },
+        projectPanel,
         h("div", { class: "panel stack" }, h("h3", {}, "Details"),
           h("dl", { class: "kv" },
             h("dt", {}, job.kind === "cover" ? "Task" : job.kind === "hum" ? "Melody" : "Mode"), h("dd", {}, job.kind === "hum" ? (p.melody || "continue").replace("_", " ") : (p.task || p.cot || "—")),
@@ -108,5 +149,6 @@ export async function songView({ el, param, app }) {
         h("div", { class: "panel stack" }, h("h3", {}, "Timing"), timingTable,
           t.abc_tps || t.semantic_tps ? h("p", { class: "hint num" }, `ABC ${fmt.tps(t.abc_tps)} · semantic ${fmt.tps(t.semantic_tps)}`) : null),
         job.artifacts.plan ? h("div", { class: "panel" }, planDetails) : null)));
+  paintProject();
   return { unmount: () => player.stop() };
 }

@@ -8,6 +8,8 @@ import { songView } from "./views/song.js";
 import { coverView } from "./views/cover.js";
 import { humView } from "./views/hum.js";
 import { settingsView } from "./views/settings.js";
+import { projectsView } from "./views/projects.js";
+import { projectView } from "./views/project.js";
 
 export const app = { status: null, settings: null, listeners: new Set() };
 
@@ -29,6 +31,7 @@ async function refreshStatus() {
 
 const routes = {
   create: createView, queue: queueView, library: libraryView, song: songView, cover: coverView, hum: humView, settings: settingsView,
+  projects: projectsView, project: projectView,
 };
 let current = null, routeGen = 0;
 
@@ -46,7 +49,8 @@ async function route() {
   current = null;
   stopPlayback(); // the outgoing view's players are about to leave the DOM
   document.querySelectorAll("nav.main a").forEach((a) => {
-    const active = a.getAttribute("href") === `#/${name}` || (name === "song" && a.getAttribute("href") === "#/library");
+    const href = a.getAttribute("href");
+    const active = href === `#/${name}` || (name === "song" && href === "#/library") || (name === "project" && href === "#/projects");
     if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
   // Fresh container per route: a superseded view that paints after its await hits a detached node.

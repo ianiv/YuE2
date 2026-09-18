@@ -283,3 +283,158 @@ export function uploadPicker({ onPick, label = "Or reuse a recent upload" } = {}
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 export const confirmDialog = (msg) => window.confirm(msg);
+
+// -- projects --------------------------------------------------------------------------------
+
+/** "Project › Track" link tag for a job that is a take (★ when it is the chosen take); null otherwise. */
+export function projectTag(job) {
+  const t = job && job.take;
+  if (!t) return null;
+  return h("a", { class: "tag accent take-tag", href: `#/project/${t.project_id}`, title: `${t.project_name} › ${t.track_name}${t.chosen ? " · chosen take" : ""}` },
+    `${fmt.excerpt(t.project_name, 20)} › ${fmt.excerpt(t.track_name, 20)}`, t.chosen ? " ★" : null);
+}
+
+/**
+ * Thumb (👍/👎) toggles, five star buttons and a note input for a take; every change is saved with
+ * PATCH /api/takes/{id} and `onChange(job)` gets the updated Job. `set(job)` refreshes from a reload
+ * (the note is left alone while it is being edited).
+ */
+export function takeControls(job, { onChange = null } = {}) {
+  let take = { ...(job.take || {}) };
+  const thumb = (v, glyph, label) => h("button", { type: "button", class: "thumb ghost sm", title: label, "aria-label": label, "aria-pressed": "false", onclick: () => save({ thumb: take.thumb === v ? 0 : v }) }, glyph);
+  const up = thumb(1, "👍", "Thumbs up"), down = thumb(-1, "👎", "Thumbs down");
+  const stars = h("div", { class: "stars", role: "group", "aria-label": "Stars" }, [1, 2, 3, 4, 5].map((n) =>
+    h("button", { type: "button", dataset: { n }, title: `${n} star${n === 1 ? "" : "s"}`, "aria-label": `${n} star${n === 1 ? "" : "s"}`, "aria-pressed": "false", onclick: () => save({ stars: take.stars === n ? null : n }) }, "★")));
+  const note = h("input", { type: "text", class: "note", placeholder: "Note…", "aria-label": "Note", maxlength: 4000, value: take.note || "",
+    onchange: () => { if (note.value !== (take.note || "")) save({ note: note.value }); } });
+  const el = h("div", { class: "take-controls row" }, h("div", { class: "row nowrap", style: "gap:0" }, up, down), stars, h("div", { class: "note-wrap" }, note));
+  function sync() {
+    up.setAttribute("aria-pressed", String(take.thumb === 1)); down.setAttribute("aria-pressed", String(take.thumb === -1));
+    stars.querySelectorAll("button").forEach((b) => { const on = Number(b.dataset.n) <= (take.stars || 0); b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(Number(b.dataset.n) === take.stars)); });
+    stars.title = take.stars ? `${take.stars} of 5 stars` : "Not rated";
+    if (document.activeElement !== note) note.value = take.note || "";
+  }
+  async function save(patch) {
+    el.classList.add("saving");
+    try { const { job: j } = await api.patchTake(job.id, patch); take = { ...(j.take || take) }; sync(); onChange && onChange(j); }
+    catch (e) { toastError(e); sync(); }
+    el.classList.remove("saving");
+  }
+  el.set = (j) => { take = { ...(j.take || {}) }; sync(); };
+  sync();
+  return el;
+}
+
+/**
+ * Project → track picker with inline "New project…" / "New track…" creation. `onPick(track | null)`
+ * fires whenever the selected track changes; value() is the selected track
+ * ({id, name, project_id, project_name}) or null; select(projectId, trackId) preselects.
+ */
+export function projectPicker({ onPick = null } = {}) {
+  let projects = [], tracks = [], project = null, track = null, creating = null; // creating: "project" | "track" | null
+  const pSel = h("select", { "aria-label": "Project", onchange: () => pickProject(pSel.value) });
+  const tSel = h("select", { "aria-label": "Track", onchange: () => pickTrack(tSel.value) });
+  const newName = h("input", { type: "text", "aria-label": "New name", maxlength: 200, onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); create(); } } });
+  const newBtn = h("button", { type: "button", class: "sm", onclick: create }, "Create");
+  const newRow = h("div", { class: "row nowrap", hidden: true, style: "flex:1 1 200px" }, newName, newBtn);
+  const el = h("div", { class: "project-picker row" }, h("div", { style: "flex:1 1 160px;min-width:0" }, pSel), h("div", { style: "flex:1 1 160px;min-width:0" }, tSel), newRow);
+  const fire = () => onPick && onPick(track);
+  function paintProjects() {
+    fill(pSel, h("option", { value: "" }, projects.length ? "— project —" : "No projects yet"), projects.map((p) => h("option", { value: p.id, selected: project && p.id === project.id }, p.name)), h("option", { value: "+" }, "New project…"));
+    if (creating === "project") pSel.value = "+";
+  }
+  function paintTracks() {
+    tSel.hidden = !project;
+    fill(tSel, h("option", { value: "" }, tracks.length ? "— track —" : "No tracks yet"), tracks.map((t) => h("option", { value: t.id, selected: track && t.id === track.id }, t.name)), h("option", { value: "+" }, "New track…"));
+    if (creating === "track") tSel.value = "+";
+    newRow.hidden = !creating; newName.placeholder = creating === "project" ? "Project name" : "Track name";
+  }
+  async function pickProject(id) {
+    track = null; tracks = []; creating = id === "+" ? "project" : null;
+    project = projects.find((p) => p.id === id) || null;
+    if (project) {
+      try { tracks = (await api.project(project.id)).project.tracks; } catch (e) { toastError(e); }
+      if (!tracks.length) creating = "track";
+    }
+    pSel.value = project ? project.id : creating === "project" ? "+" : ""; // programmatic picks (select()) must sync the control too
+    paintTracks(); fire();
+    if (creating) newName.focus();
+  }
+  function pickTrack(id) {
+    creating = id === "+" ? "track" : null;
+    track = tracks.find((t) => t.id === id) || null;
+    paintTracks();
+    tSel.value = track ? track.id : creating === "track" ? "+" : "";
+    fire();
+    if (creating) newName.focus();
+  }
+  async function create() {
+    const name = newName.value.trim(); if (!name || !creating) return;
+    newBtn.disabled = true;
+    try {
+      if (creating === "project") {
+        const { project: p } = await api.createProject({ name });
+        projects.unshift(p); project = p; tracks = []; track = null; creating = "track";
+        paintProjects(); paintTracks(); newName.value = ""; newName.focus(); fire();
+      } else {
+        const { track: t } = await api.addTrack(project.id, name);
+        tracks.push(t); track = t; creating = null;
+        paintTracks(); newName.value = ""; fire();
+      }
+    } catch (e) { toastError(e); }
+    newBtn.disabled = false;
+  }
+  el.refresh = async () => { try { projects = (await api.projects()).projects; } catch (e) { toastError(e); projects = []; } paintProjects(); paintTracks(); };
+  el.select = async (projectId, trackId) => { await el.refresh(); await pickProject(projectId); if (trackId) pickTrack(trackId); };
+  el.value = () => track ? { id: track.id, name: track.name, project_id: project.id, project_name: project.name } : null;
+  el.refresh();
+  return el;
+}
+
+/**
+ * Click-to-edit text: renders `text` in `tag`; click/Enter opens an input, Enter or blur saves via
+ * `onSave(text)` (reverted with a toast when it rejects), Escape cancels. A blank value is not saved
+ * unless `allowEmpty`. Returns the element with set(text).
+ */
+export function inlineEdit(text, onSave, { tag = "span", cls = "", placeholder = "", multiline = false, allowEmpty = false, title = "Click to edit" } = {}) {
+  let value = text || "";
+  const label = h(tag, { class: `inline-edit${cls ? " " + cls : ""}`, tabindex: 0, role: "button", title, onclick: edit, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); edit(); } } });
+  const paint = () => { label.textContent = value || placeholder; label.classList.toggle("placeholder", !value); };
+  function edit() {
+    const input = multiline ? h("textarea", { class: "inline-input", rows: 2, maxlength: 2000 }, value) : h("input", { class: "inline-input", type: "text", maxlength: 200 });
+    if (!multiline) input.value = value;
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return; done = true;
+      const next = input.value.trim();
+      input.replaceWith(label);
+      if (!commit || next === value || (!next && !allowEmpty)) { paint(); return; }
+      const prev = value; value = next; paint();
+      try { await onSave(next); } catch (e) { value = prev; paint(); toastError(e); }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(false); label.focus(); }
+      else if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(true); label.focus(); }
+    });
+    input.addEventListener("blur", () => finish(true));
+    label.replaceWith(input); input.focus(); input.select();
+  }
+  paint();
+  label.set = (t) => { value = t || ""; paint(); };
+  return label;
+}
+
+/**
+ * "New take for Project › Track" banner for the `?track=` query of Create/Cover/Hum. Resolves to
+ * {el, track} or null (unknown id → toast). The ✕ removes it and calls `onDismiss` so the page
+ * submits without `track_id`; the id lives only in the page's closure, never in saved form state.
+ */
+export async function trackBanner(trackId, { onDismiss = null } = {}) {
+  if (!trackId) return null;
+  let track;
+  try { ({ track } = await api.track(trackId)); } catch (e) { toastError(e); return null; }
+  const el = h("div", { class: "takebanner row between", role: "status" },
+    h("span", {}, "New take for ", h("a", { href: `#/project/${track.project_id}` }, h("b", {}, track.project_name), " › ", h("b", {}, track.name)), h("span", { class: "hint" }, " — the result is attached to this track.")),
+    h("button", { type: "button", class: "ghost sm", title: "Submit without attaching to this track", "aria-label": "Dismiss", onclick: () => { el.remove(); onDismiss && onDismiss(); } }, "✕"));
+  return { el, track };
+}

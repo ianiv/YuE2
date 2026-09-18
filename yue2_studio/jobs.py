@@ -10,6 +10,7 @@ request handlers can share it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 import sqlite3
@@ -60,6 +61,10 @@ class ValidationFailure(ValueError):
 
 class NotFound(LookupError):
     """Raised when a referenced job / upload / group does not exist; API maps it to 404."""
+
+
+class Conflict(Exception):
+    """Raised when a project/track/take write contradicts the current state; API maps it to 409."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -260,6 +265,16 @@ class SubmitRequest(_Params):
     precision: Literal["bf16", "8bit", "4bit"] | None = None
     ode_steps: int | None = None
     loras: list[LoraRef] | None = None  # omitted => none (create/cover) or inherited (regenerate)
+    track_id: str | None = None  # attach every created job to this project track as a take
+
+    @field_validator("track_id")
+    @classmethod
+    def _track(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("track_id must be a string")
+        return v.strip() or None
 
     @field_validator("ode_steps")
     @classmethod
@@ -302,6 +317,89 @@ class SettingsModel(_Params):
 
 
 DEFAULT_SETTINGS = SettingsModel().model_dump()
+
+
+# -- projects / tracks / takes request bodies (partial patches use ``model_fields_set``) --------
+
+
+def _clean_name(value, name: str = "name") -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    value = " ".join(value.split())
+    if len(value) > 200:
+        raise ValueError(f"{name} must be at most 200 characters")
+    return value
+
+
+def _no_bool(value):
+    if isinstance(value, bool):
+        raise ValueError("must be an integer or null")
+    return value
+
+
+class ProjectBody(_Params):
+    name: str
+    description: str = Field(default="", max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        return _clean_name(v)
+
+
+class ProjectPatch(_Params):
+    name: str | None = None
+    description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        return None if v is None else _clean_name(v)
+
+
+class TrackBody(_Params):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        return _clean_name(v)
+
+
+class TrackPatch(_Params):
+    name: str | None = None
+    chosen_job_id: str | None = None
+    position: int | None = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        return None if v is None else _clean_name(v)
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def _position(cls, v):
+        return _no_bool(v)
+
+
+class OrderBody(_Params):
+    track_ids: list[str]
+
+
+class AttachBody(_Params):
+    job_ids: list[str] = Field(min_length=1)
+    move: bool = False
+
+
+class TakePatch(_Params):
+    thumb: Literal[-1, 0, 1] | None = None  # 1 = thumbs up, -1 = thumbs down, 0/null = cleared
+    stars: int | None = Field(default=None, ge=1, le=5)
+    note: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("thumb", "stars", mode="before")
+    @classmethod
+    def _ints(cls, v):
+        return _no_bool(v)
 
 
 def format_validation_error(error: ValidationError) -> str:
@@ -349,6 +447,7 @@ class Job:
     artifacts: dict = field(default_factory=lambda: {"audio": False, "score": False, "plan": False,
                                                      "transcription": False, "hum": False})
     position: int | None = None
+    take: dict | None = None  # project-track membership (see ``JobStore._take_of``), null when none
 
     @property
     def title(self) -> str | None:
@@ -392,6 +491,7 @@ class Job:
             "artifacts": dict(self.artifacts),
             "position": self.position,
             "seq": self.seq,
+            "take": None if self.take is None else dict(self.take),
         }
 
 
@@ -445,7 +545,44 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tracks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    chosen_job_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tracks_project ON tracks(project_id, position);
+CREATE TABLE IF NOT EXISTS takes (
+    job_id TEXT PRIMARY KEY,
+    track_id TEXT NOT NULL,
+    thumb INTEGER,
+    stars INTEGER,
+    note TEXT NOT NULL DEFAULT '',
+    added_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS takes_track ON takes(track_id);
 """
+
+# Every job read goes through this join so ``Job.take`` costs no extra query (a job is a take of at
+# most one track: ``takes.job_id`` is the primary key).
+_JOB_FROM = ("FROM jobs LEFT JOIN takes ON takes.job_id = jobs.id "
+             "LEFT JOIN tracks ON tracks.id = takes.track_id "
+             "LEFT JOIN projects ON projects.id = tracks.project_id")
+_JOB_SELECT = ("SELECT jobs.*, takes.track_id AS take_track_id, takes.thumb AS take_thumb, "
+               "takes.stars AS take_stars, takes.note AS take_note, takes.added_at AS take_added_at, "
+               "tracks.name AS take_track_name, tracks.project_id AS take_project_id, "
+               "projects.name AS take_project_name, (tracks.chosen_job_id = jobs.id) AS take_chosen "
+               + _JOB_FROM)
+_UNSET = object()
 
 _JOB_COLUMNS = ("id", "kind", "status", "group_id", "parent_id", "params_json", "preset", "precision",
                 "ode_steps", "seed", "created_at", "started_at", "finished_at", "error", "timing_json",
@@ -484,6 +621,25 @@ class JobStore:
         with self._lock:
             self._conn.close()
 
+    @contextlib.contextmanager
+    def _tx(self):
+        """One transaction for a multi-statement write (the connection is otherwise autocommit).
+
+        Nested use joins the outer transaction; the lock is held for the whole block.
+        """
+        with self._lock:
+            if self._conn.in_transaction:
+                yield self._conn
+                return
+            self._conn.execute("BEGIN")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
+
     # -- rows <-> Job --------------------------------------------------------------------------
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
@@ -498,6 +654,13 @@ class JobStore:
         )
         if self.songs_dir is not None:
             job.artifacts = artifacts_for(self.songs_dir / job.id)
+        if row["take_track_id"] is not None:
+            job.take = {
+                "track_id": row["take_track_id"], "project_id": row["take_project_id"],
+                "track_name": row["take_track_name"], "project_name": row["take_project_name"],
+                "thumb": row["take_thumb"], "stars": row["take_stars"], "note": row["take_note"],
+                "added_at": row["take_added_at"], "chosen": bool(row["take_chosen"]),
+            }
         return job
 
     def _fill_positions(self, jobs: list[Job]) -> None:
@@ -540,7 +703,7 @@ class JobStore:
 
     def get(self, job_id: str) -> Job:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            row = self._conn.execute(f"{_JOB_SELECT} WHERE jobs.id = ?", (job_id,)).fetchone()
             if row is None:
                 raise NotFound(f"job {job_id!r} not found")
             job = self._row_to_job(row)
@@ -563,25 +726,32 @@ class JobStore:
             return {"id": row["id"], "label": row["label"], "created_at": row["created_at"], "job_ids": ids}
 
     def list(self, *, status: list[str] | str | None = None, kind: list[str] | str | None = None,
-             group: str | None = None, limit: int = 50, offset: int = 0) -> tuple[list[Job], int]:
+             group: str | None = None, track: str | None = None, project: str | None = None,
+             limit: int = 50, offset: int = 0) -> tuple[list[Job], int]:
         """Newest first. Returns ``(jobs, total)`` where ``total`` ignores limit/offset."""
         clauses, args = [], []
         if status:
             values = [status] if isinstance(status, str) else list(status)
-            clauses.append(f"status IN ({','.join('?' * len(values))})")
+            clauses.append(f"jobs.status IN ({','.join('?' * len(values))})")
             args.extend(values)
         if kind:
             values = [kind] if isinstance(kind, str) else list(kind)
-            clauses.append(f"kind IN ({','.join('?' * len(values))})")
+            clauses.append(f"jobs.kind IN ({','.join('?' * len(values))})")
             args.extend(values)
         if group:
-            clauses.append("group_id = ?")
+            clauses.append("jobs.group_id = ?")
             args.append(group)
+        if track:
+            clauses.append("takes.track_id = ?")
+            args.append(track)
+        if project:
+            clauses.append("tracks.project_id = ?")
+            args.append(project)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
-            total = self._conn.execute(f"SELECT COUNT(*) FROM jobs{where}", args).fetchone()[0]
+            total = self._conn.execute(f"SELECT COUNT(*) {_JOB_FROM}{where}", args).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT * FROM jobs{where} ORDER BY created_at DESC, seq DESC LIMIT ? OFFSET ?",
+                f"{_JOB_SELECT}{where} ORDER BY jobs.created_at DESC, jobs.seq DESC LIMIT ? OFFSET ?",
                 [*args, int(limit), int(offset)],
             ).fetchall()
             jobs = [self._row_to_job(r) for r in rows]
@@ -668,11 +838,13 @@ class JobStore:
     # -- delete --------------------------------------------------------------------------------
 
     def delete(self, job_id: str) -> None:
-        """Remove the row; drops the group when this was its last member."""
-        with self._lock:
+        """Remove the row; drops the group when this was its last member, detaches it from its track
+        (clearing the track's choice when it was the chosen take)."""
+        with self._tx():
             row = self._conn.execute("SELECT group_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise NotFound(f"job {job_id!r} not found")
+            self._detach(job_id)
             self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             group_id = row["group_id"]
             if group_id is not None:
@@ -680,6 +852,259 @@ class JobStore:
                                                (group_id,)).fetchone()[0]
                 if remaining == 0:
                     self._conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+
+    # -- projects / tracks / takes -------------------------------------------------------------
+    #
+    # A project is an ordered list of named tracks; a job is a *take* of at most one track
+    # (``takes.job_id`` is the primary key). All results are plain dicts; takes are ``Job`` objects.
+
+    def _touch_project(self, project_id: str | None) -> None:
+        if project_id is not None:
+            self._conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now_iso(), project_id))
+
+    def _project_row(self, project_id: str) -> sqlite3.Row:
+        row = self._conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"project {project_id!r} not found")
+        return row
+
+    def _track_row(self, track_id: str) -> sqlite3.Row:
+        row = self._conn.execute(
+            "SELECT tracks.*, projects.name AS project_name FROM tracks "
+            "JOIN projects ON projects.id = tracks.project_id WHERE tracks.id = ?", (track_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"track {track_id!r} not found")
+        return row
+
+    def _takes_where(self, where: str, args: tuple) -> list[Job]:
+        rows = self._conn.execute(
+            f"{_JOB_SELECT} WHERE {where} ORDER BY tracks.position ASC, takes.added_at ASC, jobs.seq ASC",
+            args).fetchall()
+        jobs = [self._row_to_job(r) for r in rows]
+        self._fill_positions(jobs)
+        return jobs
+
+    @staticmethod
+    def _track_dict(row: sqlite3.Row, takes: list[Job]) -> dict:
+        chosen = next((j for j in takes if j.id == row["chosen_job_id"]), None)
+        return {"id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
+                "name": row["name"], "position": row["position"], "chosen_job_id": row["chosen_job_id"],
+                "created_at": row["created_at"], "takes": takes, "chosen": chosen}
+
+    def _project_tracks(self, project_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT tracks.*, projects.name AS project_name FROM tracks "
+            "JOIN projects ON projects.id = tracks.project_id WHERE tracks.project_id = ? "
+            "ORDER BY tracks.position ASC, tracks.created_at ASC", (project_id,)).fetchall()
+        by_track: dict[str, list[Job]] = {}
+        for job in self._takes_where("tracks.project_id = ?", (project_id,)):
+            by_track.setdefault(job.take["track_id"], []).append(job)
+        return [self._track_dict(r, by_track.get(r["id"], [])) for r in rows]
+
+    def _repack(self, project_id: str, ordered_ids: list[str]) -> None:
+        self._conn.executemany("UPDATE tracks SET position = ? WHERE id = ?",
+                               [(i, tid) for i, tid in enumerate(ordered_ids)])
+
+    def _track_ids(self, project_id: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT id FROM tracks WHERE project_id = ? ORDER BY position ASC, created_at ASC", (project_id,))
+        return [r["id"] for r in rows]
+
+    def _detach(self, job_id: str) -> str | None:
+        """Drop the take row (if any) and the track's choice of it; returns the track id or None."""
+        row = self._conn.execute(
+            "SELECT takes.track_id, tracks.project_id FROM takes "
+            "LEFT JOIN tracks ON tracks.id = takes.track_id WHERE takes.job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        self._conn.execute("DELETE FROM takes WHERE job_id = ?", (job_id,))
+        self._conn.execute("UPDATE tracks SET chosen_job_id = NULL WHERE chosen_job_id = ?", (job_id,))
+        self._touch_project(row["project_id"])
+        return row["track_id"]
+
+    # projects
+
+    def create_project(self, name: str, description: str = "") -> dict:
+        stamp = now_iso()
+        project_id = new_id()
+        with self._tx():
+            self._conn.execute(
+                "INSERT INTO projects (id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)",
+                (project_id, name, description, stamp, stamp))
+        return self.get_project(project_id)
+
+    def get_project(self, project_id: str) -> dict:
+        with self._lock:
+            row = self._project_row(project_id)
+            return {"id": row["id"], "name": row["name"], "description": row["description"],
+                    "created_at": row["created_at"], "updated_at": row["updated_at"],
+                    "tracks": self._project_tracks(project_id)}
+
+    def list_projects(self) -> list[dict]:
+        """Every project (no tracks) with ``track_count``/``chosen_count``, most recently updated first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT projects.*, "
+                "(SELECT COUNT(*) FROM tracks WHERE tracks.project_id = projects.id) AS track_count, "
+                "(SELECT COUNT(*) FROM tracks WHERE tracks.project_id = projects.id "
+                " AND tracks.chosen_job_id IS NOT NULL) AS chosen_count "
+                "FROM projects ORDER BY updated_at DESC, rowid DESC").fetchall()
+        return [{"id": r["id"], "name": r["name"], "description": r["description"],
+                 "created_at": r["created_at"], "updated_at": r["updated_at"],
+                 "track_count": r["track_count"], "chosen_count": r["chosen_count"]} for r in rows]
+
+    def update_project(self, project_id: str, *, name: str | None = None,
+                       description: str | None = None) -> dict:
+        with self._tx():
+            self._project_row(project_id)
+            if name is not None:
+                self._conn.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+            if description is not None:
+                self._conn.execute("UPDATE projects SET description = ? WHERE id = ?",
+                                   (description, project_id))
+            self._touch_project(project_id)
+        return self.get_project(project_id)
+
+    def delete_project(self, project_id: str) -> None:
+        """Remove the project, its tracks and their take rows; jobs and song dirs are untouched."""
+        with self._tx():
+            self._project_row(project_id)
+            self._conn.execute(
+                "DELETE FROM takes WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)",
+                (project_id,))
+            self._conn.execute("DELETE FROM tracks WHERE project_id = ?", (project_id,))
+            self._conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    # tracks
+
+    def create_track(self, project_id: str, name: str) -> dict:
+        track_id = new_id()
+        with self._tx():
+            self._project_row(project_id)
+            position = self._conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM tracks WHERE project_id = ?",
+                (project_id,)).fetchone()[0]
+            self._conn.execute(
+                "INSERT INTO tracks (id, project_id, name, position, chosen_job_id, created_at) "
+                "VALUES (?,?,?,?,NULL,?)", (track_id, project_id, name, position, now_iso()))
+            self._touch_project(project_id)
+        return self.get_track(track_id)
+
+    def get_track(self, track_id: str) -> dict:
+        with self._lock:
+            row = self._track_row(track_id)
+            return self._track_dict(row, self._takes_where("takes.track_id = ?", (track_id,)))
+
+    def update_track(self, track_id: str, *, name: str | None = None, chosen_job_id=_UNSET,
+                     position: int | None = None) -> dict:
+        """``chosen_job_id`` must be a ``done`` take of this track (``Conflict``) or ``None`` to clear;
+        ``position`` moves the track and re-packs the project's positions to ``0..n-1``."""
+        with self._tx():
+            row = self._track_row(track_id)
+            if name is not None:
+                self._conn.execute("UPDATE tracks SET name = ? WHERE id = ?", (name, track_id))
+            if chosen_job_id is not _UNSET:
+                if chosen_job_id is not None:
+                    take = self._conn.execute(
+                        "SELECT jobs.status FROM takes JOIN jobs ON jobs.id = takes.job_id "
+                        "WHERE takes.job_id = ? AND takes.track_id = ?", (chosen_job_id, track_id)).fetchone()
+                    if take is None:
+                        raise Conflict(f"job {chosen_job_id!r} is not a take of track {row['name']!r}")
+                    if take["status"] != "done":
+                        raise Conflict(f"only a finished take can be chosen (job is {take['status']})")
+                self._conn.execute("UPDATE tracks SET chosen_job_id = ? WHERE id = ?",
+                                   (chosen_job_id, track_id))
+            if position is not None:
+                ids = self._track_ids(row["project_id"])
+                ids.remove(track_id)
+                ids.insert(max(0, min(int(position), len(ids))), track_id)
+                self._repack(row["project_id"], ids)
+            self._touch_project(row["project_id"])
+        return self.get_track(track_id)
+
+    def delete_track(self, track_id: str) -> None:
+        """Remove the track and its take rows (jobs are kept); remaining positions are re-packed."""
+        with self._tx():
+            row = self._track_row(track_id)
+            self._conn.execute("DELETE FROM takes WHERE track_id = ?", (track_id,))
+            self._conn.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+            self._repack(row["project_id"], self._track_ids(row["project_id"]))
+            self._touch_project(row["project_id"])
+
+    def order_tracks(self, project_id: str, track_ids: list[str]) -> dict:
+        """Set the tracklist order; ``track_ids`` must be an exact permutation of the project's tracks."""
+        with self._tx():
+            self._project_row(project_id)
+            current = self._track_ids(project_id)
+            if len(track_ids) != len(set(track_ids)) or set(track_ids) != set(current):
+                raise ValidationFailure("track_ids must list every track of the project exactly once")
+            self._repack(project_id, list(track_ids))
+            self._touch_project(project_id)
+        return self.get_project(project_id)
+
+    # takes
+
+    def attach_takes(self, track_id: str, job_ids: list[str], *, move: bool = False) -> dict:
+        """Make ``job_ids`` takes of the track. A job already in this track is left alone; one in
+        another track raises ``Conflict`` unless ``move`` (its rating/note survive, the old track's
+        choice of it is cleared). Nothing is written unless every job exists."""
+        ordered = list(dict.fromkeys(job_ids))
+        with self._tx():
+            track = self._track_row(track_id)
+            plan: list[tuple[str, sqlite3.Row | None]] = []
+            for job_id in ordered:
+                if self._conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone() is None:
+                    raise NotFound(f"job {job_id!r} not found")
+                current = self._conn.execute(
+                    "SELECT takes.track_id, tracks.name, tracks.project_id FROM takes "
+                    "LEFT JOIN tracks ON tracks.id = takes.track_id WHERE takes.job_id = ?",
+                    (job_id,)).fetchone()
+                if current is not None and current["track_id"] != track_id and not move:
+                    where = current["name"] or "another track"
+                    raise Conflict(f"job {job_id!r} is already a take of {where}")
+                plan.append((job_id, current))
+            stamp = now_iso()
+            for job_id, current in plan:
+                if current is None:
+                    self._conn.execute(
+                        "INSERT INTO takes (job_id, track_id, thumb, stars, note, added_at) "
+                        "VALUES (?,?,NULL,NULL,'',?)", (job_id, track_id, stamp))
+                elif current["track_id"] != track_id:
+                    self._conn.execute("UPDATE takes SET track_id = ?, added_at = ? WHERE job_id = ?",
+                                       (track_id, stamp, job_id))
+                    self._conn.execute("UPDATE tracks SET chosen_job_id = NULL WHERE chosen_job_id = ?",
+                                       (job_id,))
+                    self._touch_project(current["project_id"])
+            self._touch_project(track["project_id"])
+        return self.get_track(track_id)
+
+    def detach_take(self, job_id: str) -> None:
+        with self._tx():
+            if self._detach(job_id) is None:
+                raise NotFound(f"job {job_id!r} is not a take")
+
+    def update_take(self, job_id: str, *, thumb=_UNSET, stars=_UNSET, note=_UNSET) -> Job:
+        """Rate/annotate a take (``thumb`` 1 / -1 / None, ``stars`` 1..5 / None, ``note`` str)."""
+        columns, args = [], []
+        if thumb is not _UNSET:
+            columns.append("thumb = ?")
+            args.append(None if not thumb else int(thumb))
+        if stars is not _UNSET:
+            columns.append("stars = ?")
+            args.append(None if stars is None else int(stars))
+        if note is not _UNSET:
+            columns.append("note = ?")
+            args.append("" if note is None else str(note))
+        with self._tx():
+            row = self._conn.execute(
+                "SELECT tracks.project_id FROM takes LEFT JOIN tracks ON tracks.id = takes.track_id "
+                "WHERE takes.job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"job {job_id!r} is not a take")
+            if columns:
+                self._conn.execute(f"UPDATE takes SET {', '.join(columns)} WHERE job_id = ?", [*args, job_id])
+            self._touch_project(row["project_id"])
+        return self.get(job_id)
 
     # -- settings ------------------------------------------------------------------------------
 
@@ -779,10 +1204,23 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None, lora_lookup=None,
 
     ``upload_lookup(upload_id) -> dict | None`` resolves an upload to ``{"filename": str, ...}``;
     required for covers and hums. ``lora_lookup(name) -> bool`` says whether an adapter exists and is
-    usable; ``hum_adapter_lookup(name) -> bool`` the same for hum-to-song adapters. Raises
+    usable; ``hum_adapter_lookup(name) -> bool`` the same for hum-to-song adapters. A ``track_id``
+    attaches every created job (all variations members) to that project track. Raises
     ``ValidationFailure`` (400) / ``NotFound`` (404).
     """
     req = validate_submit(body)
+    if req.track_id is not None:
+        store.get_track(req.track_id)  # 404 before any row is written
+    submission = _submit(store, req, upload_lookup=upload_lookup, lora_lookup=lora_lookup,
+                         hum_adapter_lookup=hum_adapter_lookup)
+    if req.track_id is not None:
+        store.attach_takes(req.track_id, [job.id for job in submission.jobs])
+        submission.jobs = [store.get(job.id) for job in submission.jobs]  # now carrying ``take``
+    return submission
+
+
+def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
+            hum_adapter_lookup) -> Submission:
     settings = store.get_settings()
 
     def options_for(**defaults) -> config.EngineOptions:

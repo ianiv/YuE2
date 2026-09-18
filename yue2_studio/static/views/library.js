@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, store, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectPicker, projectTag, store, toast, toastError } from "../ui.js";
 
 /** Index of each job inside its group (API has no group endpoint). Order: the submit response's
  * job order if we remembered it, else Job.seq (submit order), then seed, then created_at. */
@@ -18,7 +18,7 @@ export function groupIndex(jobs) {
 }
 
 export async function libraryView({ el, query }) {
-  const filters = { kind: "", group: query.group || "", preset: "", q: "" };
+  const filters = { kind: "", group: query.group || "", project: query.project || "", preset: "", q: "" };
   const f = {
     kind: h("select", { id: "l-kind", onchange: (e) => { filters.kind = e.target.value; load(); } }, [["", "All kinds"], ["create", "Create"], ["regenerate", "Regenerate"], ["cover", "Cover"], ["hum", "Hum"]].map(([v, t]) => h("option", { value: v }, t))),
     preset: h("select", { id: "l-preset", onchange: (e) => { filters.preset = e.target.value; paint(); } }, [["", "All presets"], ["quality", "Quality"], ["fast", "Fast"], ["custom", "Custom"]].map(([v, t]) => h("option", { value: v }, t))),
@@ -41,14 +41,22 @@ export async function libraryView({ el, query }) {
   const selectBtn = h("button", { id: "l-select", "aria-pressed": "false", onclick: () => setSelectMode(!selectMode) }, "Select");
   const selCount = h("b", {}, "0 selected");
   const deleteSelBtn = h("button", { class: "danger", disabled: true, onclick: deleteSelected }, "Delete selected");
+  // "Add to project…": a project → track picker inside the toolbar; attaching goes through POST /api/tracks/{id}/takes.
+  const picker = projectPicker({ onPick: paintSelection });
+  const attachBtn = h("button", { class: "primary sm", disabled: true, onclick: attachSelected }, "Add to track");
+  const pickerRow = h("div", { class: "row", hidden: true, style: "flex-basis:100%" }, picker, attachBtn);
+  const addToBtn = h("button", { class: "sm", "aria-pressed": "false", onclick: () => { pickerRow.hidden = !pickerRow.hidden; addToBtn.setAttribute("aria-pressed", String(!pickerRow.hidden)); paintSelection(); } }, "Add to project…");
   const selBar = h("div", { class: "selbar", hidden: true, role: "toolbar", "aria-label": "Selection" },
     selCount,
     h("button", { class: "sm", onclick: () => { visibleIds().forEach((id) => selected.add(id)); paintSelection(); } }, "Select all (visible)"),
     h("button", { class: "sm", onclick: () => { selected.clear(); paintSelection(); } }, "Clear selection"),
-    h("span", { class: "spacer" }), deleteSelBtn, h("button", { class: "ghost sm", onclick: () => setSelectMode(false) }, "Done"));
+    h("span", { class: "spacer" }), addToBtn, deleteSelBtn, h("button", { class: "ghost sm", onclick: () => setSelectMode(false) }, "Done"),
+    pickerRow);
+  const projectNote = h("div", { class: "warnbox row between", hidden: true, style: "margin-bottom:14px" });
   fill(el,
     h("div", { class: "view-head" }, h("h1", {}, "Library"), count),
     h("div", { class: "row", style: "margin-bottom:14px" }, h("div", { style: "flex:1 1 200px" }, f.q), f.kind, f.preset, f.group, selectBtn),
+    projectNote,
     selBar,
     grid, h("div", { class: "row", style: "justify-content:center;margin-top:14px" }, more), h("div", { style: "height:20px" }), failed,
     h("div", { style: "height:20px" }), uploadsPanel.el);
@@ -57,13 +65,33 @@ export async function libraryView({ el, query }) {
   const visibleIds = () => [...el.querySelectorAll("input.sel")].map((i) => i.dataset.id);
   function setSelectMode(on) {
     selectMode = on; selectBtn.setAttribute("aria-pressed", String(on)); selectBtn.textContent = on ? "Selecting…" : "Select";
-    selBar.hidden = !on; if (!on) selected.clear();
+    selBar.hidden = !on; if (!on) { selected.clear(); pickerRow.hidden = true; addToBtn.setAttribute("aria-pressed", "false"); }
     if (on && badJobs.length) failed.open = true;
     paint(); paintBad();
   }
   function paintSelection() {
     el.querySelectorAll("input.sel").forEach((i) => { i.checked = selected.has(i.dataset.id); i.closest(".card").classList.toggle("selected", i.checked); });
     selCount.textContent = `${selected.size} selected`; deleteSelBtn.disabled = selected.size === 0;
+    const target = picker.value();
+    attachBtn.disabled = selected.size === 0 || !target;
+    attachBtn.textContent = target ? `Add ${selected.size || ""} to “${fmt.excerpt(target.name, 24)}”` : "Add to track";
+  }
+  /** Attach the selection to the picked track; a job that is a take elsewhere answers 409 → offer to move it. */
+  async function attachSelected() {
+    const ids = [...selected], target = picker.value();
+    if (!ids.length || !target) return;
+    attachBtn.disabled = true;
+    try {
+      try { await api.attachTakes(target.id, ids); }
+      catch (e) {
+        if (e.status !== 409) throw e;
+        if (!confirmDialog(`${e.message}. Move it to “${target.name}” (its rating is kept)?`)) { attachBtn.disabled = false; return; }
+        await api.attachTakes(target.id, ids, true);
+      }
+      toast(`${ids.length} song${ids.length === 1 ? "" : "s"} added to ${target.project_name} › ${target.name}`, "ok", { link: { href: `#/project/${target.project_id}`, label: "Open project" } });
+      setSelectMode(false);
+      if (query.attach) location.hash = `#/project/${target.project_id}`; else load();
+    } catch (e) { toastError(e); attachBtn.disabled = false; }
   }
   const selBox = (j) => selectMode ? h("input", { type: "checkbox", class: "sel", dataset: { id: j.id }, "aria-label": `Select ${jobTitle(j)}`, checked: selected.has(j.id),
     onchange: (e) => { if (e.target.checked) selected.add(j.id); else selected.delete(j.id); paintSelection(); } }) : null;
@@ -107,7 +135,7 @@ export async function libraryView({ el, query }) {
     more.disabled = true;
     try {
       const offset = append ? jobs.length : 0;
-      const [done, bad] = await Promise.all([api.jobs({ status: "done", kind: filters.kind, group: filters.group, limit: PAGE, offset }), append ? null : api.jobs({ status: "failed,cancelled", limit: 100 })]);
+      const [done, bad] = await Promise.all([api.jobs({ status: "done", kind: filters.kind, group: filters.group, project: filters.project, limit: PAGE, offset }), append ? null : api.jobs({ status: "failed,cancelled", project: filters.project, limit: 100 })]);
       jobs = append ? jobs.concat(done.jobs) : done.jobs; total = done.total; gidx = groupIndex(jobs);
       if (!append) selected.clear(); // filter change / reload: selection no longer meaningful
       more.hidden = jobs.length >= total; more.disabled = false;
@@ -127,7 +155,7 @@ export async function libraryView({ el, query }) {
     const shown = jobs.filter((j) => (!filters.preset || j.preset === filters.preset)
       && (!filters.q || [jobTitle(j), j.params.style, j.params.lyrics].join("\n").toLowerCase().includes(filters.q)));
     count.textContent = jobs.length < total ? `${shown.length} shown of ${jobs.length} loaded (${total} total)` : `${shown.length} of ${total} songs`;
-    fill(grid, shown.length ? shown.map(songCard) : h("div", { class: "empty", style: "grid-column:1/-1" }, jobs.length || filters.kind || filters.group ? "No songs match these filters." : ["No finished songs yet. ", h("a", { href: "#/create" }, "Create one")]));
+    fill(grid, shown.length ? shown.map(songCard) : h("div", { class: "empty", style: "grid-column:1/-1" }, jobs.length || filters.kind || filters.group || filters.project ? "No songs match these filters." : ["No finished songs yet. ", h("a", { href: "#/create" }, "Create one")]));
     paintSelection();
   }
 
@@ -136,7 +164,7 @@ export async function libraryView({ el, query }) {
     return h("div", { class: "card" + (selected.has(j.id) ? " selected" : "") },
       h("div", { class: "row between" },
         h("div", { class: "row nowrap", style: "min-width:0" }, selBox(j), h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j))),
-        h("div", { class: "row", style: "gap:4px" }, h("span", { class: "tag" }, j.kind), g ? h("a", { class: "tag accent", href: `#/library?group=${g.gid}`, title: "Show this group", onclick: (e) => { e.preventDefault(); filters.group = g.gid; f.group.value = g.gid; load(); } }, `var ${g.n}/${g.total}`) : null)),
+        h("div", { class: "row", style: "gap:4px" }, h("span", { class: "tag" }, j.kind), g ? h("a", { class: "tag accent", href: `#/library?group=${g.gid}`, title: "Show this group", onclick: (e) => { e.preventDefault(); filters.group = g.gid; f.group.value = g.gid; load(); } }, `var ${g.n}/${g.total}`) : null, projectTag(j))),
       h("p", { class: "small muted" }, fmt.excerpt(j.params.style, 90)),
       h("audio", { controls: true, preload: "none", src: songUrl(j.id, "audio.flac") }),
       h("div", { class: "meta" },
@@ -162,6 +190,22 @@ export async function libraryView({ el, query }) {
     try { await api.remove(j.id); toast("Deleted", "ok"); load(); } catch (e) { toastError(e); }
   }
   await load();
+  if (filters.project) {
+    // ?project=<id>: only that project's takes; the note names it and clears the filter.
+    let name = filters.project.slice(0, 8);
+    try { name = (await api.project(filters.project)).project.name; } catch { /* keep the id */ }
+    fill(projectNote, h("span", {}, "Showing takes of ", h("a", { href: `#/project/${filters.project}` }, name)), h("button", { class: "ghost sm", onclick: () => { filters.project = ""; projectNote.hidden = true; load(); } }, "Show all"));
+    projectNote.hidden = false;
+  }
+  if (query.attach) {
+    // ?attach=<track_id> (from a project's "Add from Library…"): select mode with the picker preset to that track.
+    try {
+      const { track } = await api.track(query.attach);
+      setSelectMode(true); pickerRow.hidden = false; addToBtn.setAttribute("aria-pressed", "true");
+      await picker.select(track.project_id, track.id);
+      toast(`Select songs to add to ${track.project_name} › ${track.name}`, "info");
+    } catch (e) { toastError(e); }
+  }
   return { unmount: () => document.removeEventListener("keydown", onKey) };
 }
 
