@@ -39,6 +39,20 @@ export const api = {
   listUploads: (unused = false) => request("GET", "/api/uploads" + (unused ? "?unused=true" : "")),
   deleteUpload: (id) => request("DELETE", `/api/uploads/${id}`),
   pruneUploads: (opts = {}) => request("POST", "/api/uploads/prune", { unused: true, older_than_days: null, ...opts }),
+  // projects / tracks / takes
+  projects: () => request("GET", "/api/projects"),
+  createProject: (body) => request("POST", "/api/projects", body),
+  project: (id) => request("GET", `/api/projects/${id}`),
+  patchProject: (id, patch) => request("PATCH", `/api/projects/${id}`, patch),
+  removeProject: (id) => request("DELETE", `/api/projects/${id}`),
+  addTrack: (projectId, name) => request("POST", `/api/projects/${projectId}/tracks`, { name }),
+  orderTracks: (projectId, trackIds) => request("PUT", `/api/projects/${projectId}/order`, { track_ids: trackIds }),
+  track: (id) => request("GET", `/api/tracks/${id}`),
+  patchTrack: (id, patch) => request("PATCH", `/api/tracks/${id}`, patch),
+  removeTrack: (id) => request("DELETE", `/api/tracks/${id}`),
+  attachTakes: (trackId, jobIds, move = false) => request("POST", `/api/tracks/${trackId}/takes`, { job_ids: jobIds, move }),
+  detachTake: (jobId) => request("DELETE", `/api/takes/${jobId}`),
+  patchTake: (jobId, patch) => request("PATCH", `/api/takes/${jobId}`, patch),
   text: async (path) => {
     const res = await fetch(path);
     if (!res.ok) {
@@ -51,6 +65,7 @@ export const api = {
 };
 
 export const songUrl = (id, name) => `/api/songs/${id}/${name}`;
+export const albumUrl = (projectId, fmt = "flac") => `/api/projects/${projectId}/album.zip?format=${fmt}`;
 
 /** Subscribe to a job's SSE stream. Returns a close() function. */
 export function subscribe(jobId, { onProgress, onDone, onError }) {

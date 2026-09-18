@@ -2,6 +2,42 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — Projects
+
+### Added
+- **Projects, tracks and takes** (backend). A project is an ordered tracklist of named tracks; jobs
+  are attached to a track as *takes* (a job belongs to at most one track), rated with 👍/👎, 1–5
+  stars and a note, and one finished take per track is *chosen*. Every `Job` now carries a
+  nullable `take` (`{track_id, project_id, track_name, project_name, thumb, stars, note, added_at,
+  chosen}`, one LEFT JOIN, no extra calls) and `GET /api/jobs` filters by `track=` / `project=`.
+  `POST /api/jobs` accepts a top-level `track_id` that attaches every created job (all variations
+  members) — 404 before any row is written when the track is unknown. New tables `projects`,
+  `tracks`, `takes` are added to existing databases on open; deleting a job clears its take and
+  any track that had chosen it, deleting a track/project only detaches (songs are untouched).
+- **Projects API.** `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/{id}`,
+  `POST /api/projects/{id}/tracks`, `PUT /api/projects/{id}/order`, `GET /api/tracks/{id}`,
+  `PATCH/DELETE /api/tracks/{id}` (choose = 409 unless a `done` take of that track),
+  `POST /api/tracks/{id}/takes` (409 when the job is a take elsewhere unless `move: true`, which
+  keeps its rating), `DELETE/PATCH /api/takes/{job_id}`. `jobs.Conflict` → 409.
+- **Album export.** `GET /api/projects/{id}/album.zip?format=flac|mp3` builds
+  `<name>/NN Track.flac|mp3` from the chosen takes plus `tracklist.json` / `tracklist.md` (missing
+  tracks listed with `missing: true`), fresh per request into a temp file removed after sending;
+  409 when nothing is exportable, 503 for MP3 without ffmpeg. New module `yue2_studio/projects.py`.
+- **Projects UI.** New *Projects* nav entry: `#/projects` (create/delete, `N tracks · M chosen`)
+  and `#/project/{id}` — inline-editable name/description, an album player that plays the chosen
+  takes in order, Export ZIP (FLAC; MP3 when ffmpeg is present), a draggable tracklist (↑/↓
+  fallback), per-track takes with 👍/👎, 1–5 stars, note, sort/filter (remembered), Choose and
+  Detach, and a "New take" menu (Create / Cover / Hum with a "New take for Project › Track" banner
+  and `track_id` on submit, or "Add from Library…"). Library multi-select gains "Add to project…"
+  (a job already in another track asks before moving) and `?project=` / `?attach=`; song cards,
+  job cards and the song page show a `Project › Track` tag, and the song page has a *Project*
+  panel (attach, rate, choose, detach) — regenerate/variations from a take stay in its track.
+  `api.js` gains the projects/tracks/takes client and `albumUrl()`; `ui.js` gains `projectTag`,
+  `takeControls`, `projectPicker`, `inlineEdit` and `trackBanner`.
+- `scripts/mock_api.py` mirrors the projects routes in memory; `docs/API.md` §2–§5 document the
+  `Project` / `Track` / `Take` models, endpoints, `#/projects` + `#/project/{id}` routing and the
+  "Album from takes" flow.
+
 ## 2026-09-17 — LoRA adapters, hum to song, uploads management
 
 ### Added

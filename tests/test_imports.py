@@ -25,7 +25,7 @@ def probe(body: str) -> dict:
     return json.loads(out)
 
 
-HTTP_SIDE_MODULES = ("config", "jobs", "worker", "audio", "fake", "api", "main", "lora", "hum")
+HTTP_SIDE_MODULES = ("config", "jobs", "worker", "audio", "fake", "api", "main", "lora", "hum", "projects")
 
 
 @pytest.mark.parametrize("module", HTTP_SIDE_MODULES)

@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, h, loraPicker, presetPicker, rememberGroup, seedField, store, toast, toastError } from "../ui.js";
+import { fill, h, loraPicker, presetPicker, rememberGroup, seedField, store, toast, toastError, trackBanner } from "../ui.js";
 import { liveCard, resultCard } from "./jobcard.js";
 
 const RECENT_MAX = 20;
@@ -19,6 +19,10 @@ export async function createView({ el, query, app }) {
       toast(`Prefilled from ${job.title || job.id.slice(0, 8)} — set Variations and submit`, "info");
     } catch (e) { toastError(e); }
   }
+  // ?track=<id>: the submission becomes a take of that track. Kept in this closure only — never in store("create").
+  let trackId = null;
+  const banner = await trackBanner(query.track, { onDismiss: () => { trackId = null; history.replaceState(null, "", "#/create"); } });
+  if (banner) trackId = banner.track.id;
 
   const f = {
     title: h("input", { id: "f-title", type: "text", value: saved.title, placeholder: "Optional display title", autocomplete: "off" }),
@@ -85,6 +89,7 @@ export async function createView({ el, query, app }) {
   const resultsHead = h("div", { class: "row between" }, h("h3", {}, "Results"), h("button", { type: "button", class: "ghost sm", onclick: clearResults }, "Clear list"));
   const live = new Map(); // id -> liveCard
   fill(el, h("div", { class: "view-head" }, h("h1", {}, "Create"), h("span", { class: "sub" }, "Describe the style, write lyrics with section tags, pick a preset — results play right here.")),
+    banner ? banner.el : null,
     h("div", { class: "cols results-layout" }, form, h("div", { class: "stack results-col" }, resultsHead, results, resultsEmpty)));
 
   const recent = () => store.get("recent", []);
@@ -132,18 +137,19 @@ export async function createView({ el, query, app }) {
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     if (v.abc.trim() && v.cot === "off") return toast("An ABC score cannot be used with mode “off” — pick full or melody", "err");
     const base = { style: v.style, lyrics: v.lyrics, cot: v.cot, seed: f.seed.value(), cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale, abc: v.abc.trim() || null, title: v.title || null };
-    const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras };
+    const common = { preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId };
+    const link = banner && trackId ? { href: `#/project/${banner.track.project_id}`, label: "Open project" } : undefined;
     submit.disabled = true;
     try {
       let jobs;
       if (v.count > 1) {
         const r = await api.submit({ kind: "variations", params: { count: v.count, base, random_seeds: v.random_seeds || v.random_seed, label: null }, ...common });
         rememberGroup(r.group, r.jobs); jobs = r.jobs;
-        toast(`Queued ${r.jobs.length} variations`, "ok");
+        toast(`Queued ${r.jobs.length} variations${trackId ? ` as takes of “${banner.track.name}”` : ""}`, "ok", { link });
       } else {
         const r = await api.submit({ kind: "create", params: base, ...common });
         jobs = [r.job];
-        toast(`Queued “${r.job.title || r.job.id.slice(0, 8)}”`, "ok");
+        toast(`Queued “${r.job.title || r.job.id.slice(0, 8)}”${trackId ? ` as a take of “${banner.track.name}”` : ""}`, "ok", { link });
       }
       setRecent([...jobs.map((j) => j.id).reverse(), ...recent().filter((id) => !jobs.some((j) => j.id === id))]);
       for (const job of jobs) show(job);

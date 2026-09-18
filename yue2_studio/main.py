@@ -20,7 +20,7 @@ from pathlib import Path  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 
-from yue2_studio import __version__, api, uploads  # noqa: E402
+from yue2_studio import __version__, api, projects, uploads  # noqa: E402
 from yue2_studio.jobs import JobStore  # noqa: E402
 from yue2_studio.worker import EventBus, Worker  # noqa: E402
 
@@ -54,6 +54,7 @@ def create_app(engine=None, *, home: str | os.PathLike | None = None, fake: bool
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         await asyncio.to_thread(uploads.auto_prune, paths, store)
+        await asyncio.to_thread(projects.sweep_temp, paths.data_dir)  # album zips from interrupted downloads
         worker.start(asyncio.get_running_loop())
         try:
             yield

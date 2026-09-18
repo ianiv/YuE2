@@ -161,6 +161,24 @@ one. Command line: `uv run python scripts/hum_smoke.py --audio my-hum.m4a --adap
 hum_adapter_v1_combined` (`--analyse-only` just pitch-tracks and encodes the hum). Requires the
 cover prerequisites (`scripts/setup.py --with-cover`, ffmpeg) plus `librosa` (installed by `uv sync`).
 
+### Projects
+
+**Projects** (`#/projects`) — albums and soundtracks. A project is an ordered tracklist of named
+*tracks*; jobs are attached to a track as *takes* (a job belongs to at most one track) and one
+finished take per track is *chosen*. On the project page (`#/project/<id>`) each track has a
+**New take** menu (Create / Cover / Hum open with a "New take for Project › Track" banner and the
+result lands in that track; *Add from Library…* opens the Library in multi-select with "Add to
+project…" preset to the track). Takes are rated with 👍/👎, 1–5 stars and a note, sorted and
+filtered (one remembered preference shared by every project), and *Choose* marks the track's final
+take (only finished takes with audio).
+Tracks are renamed in place and reordered by dragging the handle (or ↑/↓). **Play album** plays
+the chosen takes in tracklist order in one player; **Export ZIP** downloads
+`<name>/01 Track.flac …` plus `tracklist.json` / `tracklist.md` (tracks without a chosen take are
+listed as missing) — the MP3 export needs ffmpeg. Song cards and the song page show a
+`Project › Track` tag (★ when chosen); the song page's *Project* panel attaches, rates, chooses or
+detaches the song, and *Regenerate* / *More variations* from a take stay in its track. Deleting a
+track or project only detaches the songs; deleting a chosen song clears the track's choice.
+
 ### Presets
 
 | Preset | Precision (AR) | ODE steps (NAR) | Notes |

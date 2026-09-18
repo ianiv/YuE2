@@ -1,14 +1,17 @@
 import { api } from "../api.js";
-import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, uploadPicker } from "../ui.js";
+import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
 
 const TASKS = [["melody-full", "Melody → full", "Transcribe the melody, let YuE2 write the full arrangement. Recommended for covers."],
   ["melody-vocal", "Melody → vocal", "Transcribe the melody and follow it with the vocal line only."],
   ["full", "Full transcription", "Transcribe the whole arrangement and follow it closely (closest to the original)."]];
 const ACCEPT = ".mp3,.wav,.flac,.m4a,.ogg";
 
-export async function coverView({ el, app }) {
+export async function coverView({ el, query, app }) {
   const saved = store.get("cover", { style: "", lyrics: "", task: "melody-full", seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
   let upload = null, dirty = false, task = saved.task;
+  let trackId = null; // ?track=<id>: closure only, never in store("cover")
+  const banner = await trackBanner(query.track, { onDismiss: () => { trackId = null; history.replaceState(null, "", "#/cover"); } });
+  if (banner) trackId = banner.track.id;
   const fileIn = h("input", { type: "file", accept: ACCEPT, id: "c-file", onchange: (e) => e.target.files[0] && doUpload(e.target.files[0]) });
   const dropIdle = () => [h("b", {}, "Drop an audio file"), " or click to choose", h("div", { class: "hint" }, "mp3, wav, flac, m4a, ogg · up to 200 MB")];
   const dropText = h("div", {}, dropIdle());
@@ -72,8 +75,8 @@ export async function coverView({ el, app }) {
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     submit.disabled = true;
     try {
-      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, params: { upload_id: upload.upload_id, task: v.task, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null } });
-      toast(`Queued cover “${r.job.title || upload.filename}”`, "ok"); location.hash = "#/queue";
+      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId, params: { upload_id: upload.upload_id, task: v.task, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null } });
+      toast(`Queued cover “${r.job.title || upload.filename}”`, "ok"); location.hash = trackId ? `#/project/${banner.track.project_id}` : "#/queue";
     } catch (err) { toastError(err); submit.disabled = false; }
   }
 
@@ -88,7 +91,7 @@ export async function coverView({ el, app }) {
       h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
       submit, h("p", { class: "hint" }, "The upload is transcribed first (SheetSage2 + MERT), then the song is generated from that score.")));
-  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Cover"), h("span", { class: "sub" }, "Transcribe an existing recording and re-imagine it in a new style.")), form);
+  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Cover"), h("span", { class: "sub" }, "Transcribe an existing recording and re-imagine it in a new style.")), banner ? banner.el : null, form);
   // Restore the last-used upload only if it still exists on the server — and only if the user has not
   // already dropped/recorded a fresh file while the list was loading.
   picker.refresh().then(() => { if (saved.upload_id && !upload && !dirty) { const u = picker.set(saved.upload_id); if (u) usePicked(u); else collect(); } });

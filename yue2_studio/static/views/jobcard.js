@@ -1,6 +1,6 @@
 // Shared job cards: a live (queued/running) card driven by SSE, and result cards for terminal jobs.
 import { api, songUrl, subscribe } from "../api.js";
-import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, renderScore, STAGE_NAMES, stagesFor, toast, toastError } from "../ui.js";
+import { clearScore, estimate, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectTag, renderScore, STAGE_NAMES, stagesFor, toast, toastError } from "../ui.js";
 
 const groupTag = (job) => job.group_id ? h("span", { class: "tag accent", title: groupLabel(job.group_id) || "variation group" }, groupLabel(job.group_id) ? fmt.excerpt(groupLabel(job.group_id), 28) : "group") : null;
 
@@ -23,7 +23,7 @@ export function liveCard(job, { onFinish, onGone, scoreCollapsed = false } = {})
   const status = h("span", { class: "tag" }, job.status);
   c.el = h("div", { class: "card", dataset: { id: job.id } },
     h("div", { class: "row between" },
-      h("div", { class: "row" }, h("span", { class: "title" }, jobTitle(job)), status, h("span", { class: "tag" }, job.kind), groupTag(job)),
+      h("div", { class: "row" }, h("span", { class: "title" }, jobTitle(job)), status, h("span", { class: "tag" }, job.kind), groupTag(job), projectTag(job)),
       cancelBtn),
     h("div", { class: "meta" }, h("span", {}, "preset ", h("b", {}, job.preset)), job.loras && job.loras.length ? h("span", { title: loraLabel(job.loras) }, "lora ", h("b", {}, loraLabel(job.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, job.seed)), h("span", {}, "mode ", h("b", {}, modeLabel(job))),
       job.position !== null && job.status === "queued" ? h("span", { class: "pos" }, "position ", h("b", {}, job.position + 1)) : null),
@@ -115,7 +115,7 @@ export function resultCard(job, { onUseSeed, onDismiss } = {}) {
   const t = job.timing || {};
   const head = h("div", { class: "row between" },
     h("div", { class: "row" }, h("a", { class: "title", href: `#/song/${job.id}` }, jobTitle(job)),
-      h("span", { class: `tag ${job.status === "done" ? "ok" : job.status === "failed" ? "err" : ""}` }, job.status), h("span", { class: "tag" }, job.kind), groupTag(job)),
+      h("span", { class: `tag ${job.status === "done" ? "ok" : job.status === "failed" ? "err" : ""}` }, job.status), h("span", { class: "tag" }, job.kind), groupTag(job), projectTag(job)),
     onDismiss ? h("button", { class: "ghost sm", title: "Remove from this list", "aria-label": "Dismiss", onclick: () => onDismiss(job) }, "✕") : null);
   const meta = h("div", { class: "meta" },
     job.status === "done" ? h("span", {}, h("b", { class: "num" }, fmt.dur(t.audio_seconds))) : null,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,10 +18,11 @@ from fastapi import APIRouter, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from yue2_studio import __version__, audio, config, jobs, lora, uploads
-from yue2_studio.jobs import Job, JobStore, NotFound, ValidationFailure
+from yue2_studio import __version__, audio, config, jobs, lora, projects, uploads
+from yue2_studio.jobs import Conflict, Job, JobStore, NotFound, ValidationFailure
 from yue2_studio.worker import Worker
 
 router = APIRouter(prefix="/api")
@@ -65,6 +67,10 @@ def install_error_handlers(app) -> None:
     @app.exception_handler(NotFound)
     async def _not_found(request: Request, exc: NotFound):
         return error_response(404, "not_found", str(exc))
+
+    @app.exception_handler(Conflict)
+    async def _conflict(request: Request, exc: Conflict):
+        return error_response(409, "conflict", str(exc))
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation(request: Request, exc: RequestValidationError):
@@ -289,13 +295,14 @@ def _csv(value: str | None, allowed: tuple[str, ...], name: str) -> list[str] | 
 
 @router.get("/jobs")
 async def list_jobs(request: Request, status: str | None = None, group: str | None = None,
-                    kind: str | None = None, limit: int = 50, offset: int = 0):
+                    kind: str | None = None, track: str | None = None, project: str | None = None,
+                    limit: int = 50, offset: int = 0):
     statuses = _csv(status, jobs.STATUSES, "status")
     kinds = _csv(kind, jobs.KINDS, "kind")
     if limit < 1 or limit > 500 or offset < 0:
         raise ApiError(400, "validation_error", "limit must be 1..500 and offset >= 0")
-    items, total = _store(request).list(status=statuses, kind=kinds, group=group or None, limit=limit,
-                                        offset=offset)
+    items, total = _store(request).list(status=statuses, kind=kinds, group=group or None, track=track or None,
+                                        project=project or None, limit=limit, offset=offset)
     return {"jobs": [describe(request, j) for j in items], "total": total}
 
 
@@ -450,6 +457,142 @@ async def song_artifacts_zip(request: Request, job_id: str):
     path = await asyncio.to_thread(audio.build_zip, song_dir)
     return FileResponse(path, media_type="application/zip", filename=f"{job_id}.zip",
                         content_disposition_type="attachment")
+
+
+# ---------------------------------------------------------------------------------------------
+# projects / tracks / takes
+# ---------------------------------------------------------------------------------------------
+
+
+def _track_json(request: Request, track: dict) -> dict:
+    """Track dict from the store with its takes (and chosen take) as live Job JSON."""
+    out = dict(track)
+    out["takes"] = [describe(request, j) for j in track["takes"]]
+    out["chosen"] = None if track["chosen"] is None else describe(request, track["chosen"])
+    return out
+
+
+def _project_json(request: Request, project: dict) -> dict:
+    out = dict(project)
+    out["tracks"] = [_track_json(request, t) for t in project["tracks"]]
+    return out
+
+
+async def _body(request: Request, model):
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        raise ApiError(400, "validation_error", "body must be a JSON object")
+    return jobs.parse(model, body)
+
+
+@router.get("/projects")
+async def list_projects(request: Request):
+    return {"projects": _store(request).list_projects()}
+
+
+@router.post("/projects", status_code=201)
+async def post_project(request: Request):
+    body = await _body(request, jobs.ProjectBody)
+    project = _store(request).create_project(body.name, body.description)
+    return JSONResponse({"project": _project_json(request, project)}, status_code=201)
+
+
+@router.get("/projects/{project_id}")
+async def get_project(request: Request, project_id: str):
+    return {"project": _project_json(request, _store(request).get_project(project_id))}
+
+
+@router.patch("/projects/{project_id}")
+async def patch_project(request: Request, project_id: str):
+    body = await _body(request, jobs.ProjectPatch)
+    fields = {k: getattr(body, k) for k in body.model_fields_set if k in ("name", "description")}
+    project = _store(request).update_project(project_id, **fields)
+    return {"project": _project_json(request, project)}
+
+
+@router.delete("/projects/{project_id}", status_code=204)
+async def delete_project(request: Request, project_id: str):
+    _store(request).delete_project(project_id)
+    return Response(status_code=204)
+
+
+@router.post("/projects/{project_id}/tracks", status_code=201)
+async def post_track(request: Request, project_id: str):
+    body = await _body(request, jobs.TrackBody)
+    track = _store(request).create_track(project_id, body.name)
+    return JSONResponse({"track": _track_json(request, track)}, status_code=201)
+
+
+@router.put("/projects/{project_id}/order")
+async def put_order(request: Request, project_id: str):
+    body = await _body(request, jobs.OrderBody)
+    project = _store(request).order_tracks(project_id, body.track_ids)
+    return {"project": _project_json(request, project)}
+
+
+@router.get("/projects/{project_id}/album.zip")
+async def project_album_zip(request: Request, project_id: str, format: str = "flac"):
+    """The chosen takes as ``<slug>/NN Name.<format>`` + ``tracklist.json``/``.md``, built fresh
+    into a temp file that is removed once sent."""
+    if format not in projects.FORMATS:
+        raise ApiError(400, "validation_error", f"format must be one of {', '.join(projects.FORMATS)}")
+    state = _state(request)
+    project = state.store.get_project(project_id)
+    if format == "mp3" and audio.ffmpeg_path() is None:
+        raise ApiError(503, "engine_unavailable", "ffmpeg is not installed; MP3 export unavailable")
+    try:
+        path = await asyncio.to_thread(projects.build_album_zip, project, state.paths.songs_dir, fmt=format,
+                                       dest_dir=state.paths.data_dir)
+    except ValueError as error:
+        raise ApiError(409, "conflict", str(error)) from None
+    except audio.FfmpegMissing as error:
+        raise ApiError(503, "engine_unavailable", str(error)) from None
+    slug = projects.safe_name(project["name"], fallback="album")
+    return FileResponse(path, media_type="application/zip", filename=f"{slug}.zip",
+                        content_disposition_type="attachment", background=BackgroundTask(os.unlink, path))
+
+
+@router.get("/tracks/{track_id}")
+async def get_track(request: Request, track_id: str):
+    track = _store(request).get_track(track_id)
+    return {"track": _track_json(request, track),
+            "project": {"id": track["project_id"], "name": track["project_name"]}}
+
+
+@router.patch("/tracks/{track_id}")
+async def patch_track(request: Request, track_id: str):
+    body = await _body(request, jobs.TrackPatch)
+    keys = ("name", "chosen_job_id", "position")
+    fields = {k: getattr(body, k) for k in body.model_fields_set if k in keys}
+    track = _store(request).update_track(track_id, **fields)
+    return {"track": _track_json(request, track)}
+
+
+@router.delete("/tracks/{track_id}", status_code=204)
+async def delete_track(request: Request, track_id: str):
+    _store(request).delete_track(track_id)
+    return Response(status_code=204)
+
+
+@router.post("/tracks/{track_id}/takes")
+async def post_takes(request: Request, track_id: str):
+    body = await _body(request, jobs.AttachBody)
+    track = _store(request).attach_takes(track_id, body.job_ids, move=body.move)
+    return {"track": _track_json(request, track)}
+
+
+@router.delete("/takes/{job_id}", status_code=204)
+async def delete_take(request: Request, job_id: str):
+    _store(request).detach_take(job_id)
+    return Response(status_code=204)
+
+
+@router.patch("/takes/{job_id}")
+async def patch_take(request: Request, job_id: str):
+    body = await _body(request, jobs.TakePatch)
+    fields = {k: getattr(body, k) for k in body.model_fields_set if k in ("thumb", "stars", "note")}
+    job = _store(request).update_take(job_id, **fields)
+    return {"job": describe(request, job)}
 
 
 # ---------------------------------------------------------------------------------------------

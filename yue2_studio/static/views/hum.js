@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, uploadPicker } from "../ui.js";
+import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
 
 const MELODY = [["continue", "Continue my melody", "The hum's notes open the score; YuE2 writes the rest of the song around them (the hummed phrase tends to come back as the hook)."],
   ["hum_only", "Hum is the whole melody", "The transcribed hum is the complete vocal line, like a cover; the song is as long as the hum."],
@@ -8,9 +8,12 @@ const ACCEPT = ".mp3,.wav,.flac,.m4a,.ogg,.webm,.mp4";
 const MIME_EXT = [["audio/mp4", "m4a"], ["audio/webm;codecs=opus", "webm"], ["audio/webm", "webm"], ["audio/ogg;codecs=opus", "ogg"], ["audio/ogg", "ogg"]];
 const MAX_RECORD_S = 120;
 
-export async function humView({ el, app }) {
+export async function humView({ el, query, app }) {
   const saved = store.get("hum", { style: "", lyrics: "", melody: "continue", adapter: "", hum_influence: 1, offset_s: 0, seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
   let upload = null, dirty = false, melody = saved.melody;
+  let trackId = null; // ?track=<id>: closure only, never in store("hum")
+  const banner = await trackBanner(query.track, { onDismiss: () => { trackId = null; history.replaceState(null, "", "#/hum"); } });
+  if (banner) trackId = banner.track.id;
 
   // -- input: drop zone + in-browser recorder + recent-upload picker -----------------------------
   const fileIn = h("input", { type: "file", accept: ACCEPT, id: "h-file", onchange: (e) => e.target.files[0] && doUpload(e.target.files[0]) });
@@ -107,8 +110,8 @@ export async function humView({ el, app }) {
     submit.disabled = true;
     try {
       const params = { upload_id: upload.upload_id, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null, melody: v.melody, adapter: v.adapter || null, hum_influence: v.hum_influence, offset_s: v.offset_s };
-      const r = await api.submit({ kind: "hum", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, params });
-      toast(`Queued “${r.job.title || upload.filename}”`, "ok"); location.hash = "#/queue";
+      const r = await api.submit({ kind: "hum", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId, params });
+      toast(`Queued “${r.job.title || upload.filename}”`, "ok"); location.hash = trackId ? `#/project/${banner.track.project_id}` : "#/queue";
     } catch (err) { toastError(err); submit.disabled = false; }
   }
 
@@ -132,7 +135,7 @@ export async function humView({ el, app }) {
       h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
       submit, h("p", { class: "hint" }, "The hum is transcribed (SheetSage2), the score is continued by the planner, and — with an adapter — its pitch and timing shape the decoder.")));
-  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Hum to song"), h("span", { class: "sub" }, "Hum a melody for 10–30 seconds, add a style and lyrics, get a whole song built around it.")), form);
+  fill(el, h("div", { class: "view-head" }, h("h1", {}, "Hum to song"), h("span", { class: "sub" }, "Hum a melody for 10–30 seconds, add a style and lyrics, get a whole song built around it.")), banner ? banner.el : null, form);
   // Restore the last-used upload only if it still exists on the server — and only if the user has not
   // already dropped/recorded a fresh file while the list was loading.
   picker.refresh().then(() => { if (saved.upload_id && !upload && !dirty) { const u = picker.set(saved.upload_id); if (u) usePicked(u); else collect(); } });

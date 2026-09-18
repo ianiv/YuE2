@@ -14,10 +14,10 @@ Both sides implement this document independently; any change here must be made h
 | HTTP | `error.code`         | When |
 |------|----------------------|------|
 | 400  | `validation_error`   | bad/missing field, enum violation, `abc` with `cot=off`, bad upload type/size |
-| 404  | `not_found`          | unknown job/group/upload id, missing artifact (e.g. `plan.json` for a failed job) |
-| 409  | `conflict`           | cancel of done/failed/cancelled job; delete of running job; cover when `status.cover.available=false` |
+| 404  | `not_found`          | unknown job/group/upload/project/track id, missing artifact (e.g. `plan.json` for a failed job), `PATCH/DELETE /api/takes/{id}` for a job that is not a take |
+| 409  | `conflict`           | cancel of done/failed/cancelled job; delete of running job; cover when `status.cover.available=false`; attaching a job that is already a take of another track (without `move`); choosing a take that is not `done`; album export with nothing exportable |
 | 413  | `too_large`          | upload > 200 MB |
-| 503  | `engine_unavailable` | engine failed to load / models missing (`status.models.present=false`) |
+| 503  | `engine_unavailable` | engine failed to load / models missing (`status.models.present=false`); `audio.mp3` or `album.zip?format=mp3` without ffmpeg |
 | 500  | `internal_error`     | anything else |
 
 ## 2. Data models
@@ -50,6 +50,7 @@ Types: `str`, `int`, `float`, `bool`, `[T]` list, `T?` nullable, `enum(a|b)`.
 | `artifacts` | object | `{"audio": bool, "score": bool, "plan": bool, "transcription": bool, "hum": bool}`; all false until produced |
 | `position` | int? | 0-based queue position while `queued`; null otherwise |
 | `seq` | int | server-wide insertion counter (strictly increasing); order by it when `created_at` ties (variations members share a millisecond) |
+| `take` | Take? | project membership: set while the job is a take of a track (see `Take`), else null |
 
 ### CreateParams
 
@@ -126,6 +127,7 @@ are rejected as `adapter`.
 | `precision` | enum(bf16\|8bit\|4bit)? | only honoured when `preset=custom`; required then |
 | `ode_steps` | int? | 4..64; only honoured when `preset=custom`; required then |
 | `loras` | [LoraRef]? | adapters to merge, in order, at most 8, names unique; omitted = none (`regenerate`: inherited from the parent; send `[]` to clear) |
+| `track_id` | str? | attach every created job (all `variations` members) to this project track as a take; 404 `not_found` for an unknown track **before any job is written**. Never inferred from `parent_id`: a regenerate is only a take when the client says so |
 
 ### LoraRef
 
@@ -153,6 +155,50 @@ a few informative keys. `kind` is `"lora"` or `"hum"`: a hum-to-song adapter als
 
 `{"id": str (uuid4 hex), "label": str, "created_at": str, "job_ids": [str]}` — `job_ids` in submit order
 (= ascending `seq`; equals seed order unless `random_seeds`).
+
+### Project
+
+A project is an ordered tracklist; a **track is a named slot** whose candidate jobs are its **takes**, one of
+which can be **chosen** as the final take. A job is a take of **at most one** track.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | str | uuid4 hex |
+| `name` | str | 1..200 chars, whitespace collapsed |
+| `description` | str | ≤ 2000 chars, `""` when none |
+| `created_at` | str | |
+| `updated_at` | str | bumped by every project/track/take write (including ratings) |
+| `tracks` | [Track] | ordered by `position`; **only in `GET /api/projects/{id}` and the responses that return a full project** |
+| `track_count` | int | **only in the `GET /api/projects` list** (which omits `tracks`) |
+| `chosen_count` | int | list only: tracks with a `chosen_job_id` |
+
+### Track
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | str | uuid4 hex |
+| `project_id` | str | |
+| `project_name` | str | denormalised for banners/tags |
+| `name` | str | 1..200 chars |
+| `position` | int | 0-based, always packed `0..n-1` within the project |
+| `chosen_job_id` | str? | the final take; always a `done` take of this track (cleared when that job is deleted, detached or moved) |
+| `created_at` | str | |
+| `takes` | [Job] | ordered by `take.added_at` then `seq`; every status (queued/running/failed takes are listed as such) |
+| `chosen` | Job? | the `takes` entry whose id is `chosen_job_id` |
+
+### Take (`Job.take`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `track_id` | str | |
+| `project_id` | str | |
+| `track_name` | str | |
+| `project_name` | str | |
+| `thumb` | int? | `1` 👍, `-1` 👎, `null` none |
+| `stars` | int? | 1..5 or `null` |
+| `note` | str | `""` when none, ≤ 4000 chars |
+| `added_at` | str | when it was attached (reset on `move`) |
+| `chosen` | bool | `track.chosen_job_id == job.id` |
 
 ### ProgressEvent (SSE `data`)
 
@@ -244,7 +290,7 @@ adapter names; `POST /api/jobs {kind:"hum"}` answers 409 while it is unavailable
 
 ### `POST /api/jobs`
 
-Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?, "loras"?}`.
+Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?, "loras"?, "track_id"?}`.
 
 ```json
 {"kind": "create", "preset": "fast",
@@ -254,11 +300,13 @@ Body: `{"kind", "params", "preset"?, "precision"?, "ode_steps"?, "loras"?}`.
 
 `kind=variations` → **201** `{"group": Group, "jobs": [Job, …]}` (jobs in submit/`seq` order, each `kind=create`, `group_id` set).
 
-Errors: 400 validation; 404 unknown `parent_id`/`upload_id`; 409 cover unavailable; 503 models missing.
+Errors: 400 validation; 404 unknown `parent_id`/`upload_id`/`track_id`; 409 cover unavailable; 503 models missing.
+With `track_id` every returned job carries `take` (attached before the response, in submit order).
 
-### `GET /api/jobs?status=&group=&kind=&limit=&offset=`
+### `GET /api/jobs?status=&group=&kind=&track=&project=&limit=&offset=`
 
-All query params optional. `status` and `kind` accept comma-separated lists (`status=queued,running`).
+All query params optional. `status` and `kind` accept comma-separated lists (`status=queued,running`);
+`track=<track_id>` / `project=<project_id>` keep only takes of that track / project.
 `limit` default 50, max 500; `offset` default 0. Ordered by `created_at` **descending**.
 → 200 `{"jobs": [Job, …], "total": int}` (`total` = count matching the filter, ignoring limit/offset).
 
@@ -314,6 +362,59 @@ data: {"job": <Job JSON>}
 404 when the job or the file does not exist (e.g. job not yet done). `{id}` is the job id. These routes also
 answer `HEAD` (players probe with it before requesting ranges).
 
+### Projects — `/api/projects`
+
+Bodies are JSON objects; partial `PATCH` bodies only touch the keys present (`null` is a value, e.g.
+`{"chosen_job_id": null}` clears the choice). Every Job inside a project/track response is the live `Job` shape
+(running takes carry their last `progress` event). Deleting a project or track never touches jobs or song dirs.
+
+- `GET /api/projects` → 200 `{"projects": [Project, …]}` — list shape (`track_count`, `chosen_count`, no `tracks`),
+  most recently updated first.
+- `POST /api/projects` body `{"name", "description"?}` → **201** `{"project": Project}` (with `tracks: []`) | 400.
+- `GET /api/projects/{id}` → 200 `{"project": Project}` with `tracks[*].takes` / `chosen` | 404.
+- `PATCH /api/projects/{id}` body `{"name"?, "description"?}` → 200 `{"project": Project}` | 400 | 404.
+- `DELETE /api/projects/{id}` → **204** (tracks and take rows removed; jobs kept) | 404.
+- `POST /api/projects/{id}/tracks` body `{"name"}` → **201** `{"track": Track}` (appended, `position` = n) | 400 | 404.
+- `PUT /api/projects/{id}/order` body `{"track_ids": [str]}` → 200 `{"project": Project}`; 400 `validation_error`
+  unless the list is an exact permutation of the project's track ids (missing, extra or duplicate ids) | 404.
+- `GET /api/projects/{id}/album.zip?format=flac|mp3` (default `flac`) → 200 `application/zip`,
+  `Content-Disposition: attachment; filename="<project name>.zip"` (RFC 5987 `filename*=` when the name needs it).
+  Built fresh per request: `<name>/NN <track name>.<format>` for every track with a chosen take whose audio exists
+  (`NN` = 1-based tracklist position, stored uncompressed), plus `<name>/tracklist.json` and `<name>/tracklist.md`.
+  Tracks without an exportable take are skipped in the files but listed with `"missing": true`. Errors: 400 bad
+  `format`; 404; **409** `conflict` when no track is exportable; **503** `engine_unavailable` for `mp3` without
+  ffmpeg (checked before any work; MP3s are transcoded beside each FLAC and cached like `audio.mp3`).
+
+  `tracklist.json`:
+  ```json
+  {"project": {"id": "…", "name": "Soundtrack", "description": ""}, "format": "flac", "generated_at": "…Z",
+   "tracks": [{"n": 1, "track_id": "…", "name": "Main theme", "job_id": "…", "title": "Opening", "file": "01 Main theme.flac",
+               "seconds": 187.4, "preset": "quality", "seed": 42, "kind": "create", "missing": false},
+              {"n": 2, "track_id": "…", "name": "Credits", "job_id": null, "title": null, "file": null,
+               "seconds": null, "preset": null, "seed": null, "kind": null, "missing": true}]}
+  ```
+
+### Tracks — `/api/tracks/{id}`
+
+- `GET /api/tracks/{id}` → 200 `{"track": Track, "project": {"id", "name"}}` | 404 (for the `?track=` banners).
+- `PATCH /api/tracks/{id}` body `{"name"?, "position"?, "chosen_job_id"?}` → 200 `{"track": Track}` | 400 (`position`
+  < 0, blank name) | 404 | **409** `conflict` when `chosen_job_id` is not a take of this track or its job is not `done`.
+  `position` moves the track and re-packs the project's positions (out of range = last).
+- `DELETE /api/tracks/{id}` → **204** (take rows dropped, jobs kept, remaining positions re-packed) | 404.
+
+### Takes
+
+- `POST /api/tracks/{id}/takes` body `{"job_ids": [str] (≥ 1), "move"?: bool}` → 200 `{"track": Track}`. A job
+  already in this track is left alone (rating kept); one in another track answers **409** `conflict`
+  (`"job '<id>' is already a take of <track name>"`) unless `move: true`, which moves it keeping `thumb`/`stars`/`note`
+  and clears the old track's `chosen_job_id` if it was that job. 404 unknown track or **any** unknown job (nothing is
+  written); 400 empty list.
+- `DELETE /api/takes/{job_id}` → **204** (detached: the rating row is dropped and the track's choice is cleared
+  when it was chosen; the job and its song are kept) | 404 when the job is not a take.
+- `PATCH /api/takes/{job_id}` body `{"thumb"?: -1|0|1|null, "stars"?: 1..5|null, "note"?: str}` → 200 `{"job": Job}`
+  (`0` and `null` both clear `thumb`; `null` clears `stars`; `note` ≤ 4000 chars) | 400 | 404 not a take.
+- `DELETE /api/jobs/{id}` also removes the job's take row and clears any track that had chosen it.
+
 ### `POST /api/upload`
 
 `multipart/form-data`, single field `file`. Accepted extensions: `mp3 wav flac m4a ogg webm mp4` (the last two
@@ -356,10 +457,16 @@ Single `index.html`; the router reads `location.hash`:
 |-------|------|
 | `#/create` (default) | Create form; `?from=<job_id>` prefills from an existing job ("More variations") |
 | `#/queue` | queued + running jobs, live via one `EventSource` per visible job |
-| `#/library` | `GET /api/jobs?status=done` (+ filters `kind`, `group`); "Uploads" panel over `GET /api/uploads` with delete / prune |
-| `#/song/{id}` | song detail (player, score, timing, regenerate) |
+| `#/library` | `GET /api/jobs?status=done` (+ filters `kind`, `group`, `project`); "Uploads" panel over `GET /api/uploads` with delete / prune; `?attach=<track_id>` opens multi-select with "Add to project" preset to that track; cards show a `Project › Track` tag from `job.take` |
+| `#/song/{id}` | song detail (player, score, timing, regenerate); "Project" panel: attach via picker, or rate (`PATCH /api/takes/{id}`), "Choose as final take", Detach; regenerate/variations from a take pass `track_id` |
 | `#/cover` | upload + cover form |
+| `#/projects` | `GET /api/projects` cards (name, `N tracks · M chosen`, updated) + "New project" form |
+| `#/project/{id}` | `GET /api/projects/{id}`: editable name/description, album player over the chosen takes, Export ZIP (FLAC / MP3 when `status.ffmpeg`), draggable tracklist (`PUT …/order`), per-track takes with thumbs/stars/note, Choose, Detach, "New take" → `#/create?track=`, `#/cover?track=`, `#/hum?track=` |
 | `#/settings` | settings drawer/page |
+
+`#/create`, `#/cover` and `#/hum` read `?track=<track_id>` (`GET /api/tracks/{id}` for the banner "New take for
+Project › Track") and send it as `track_id`; it lives only in that page's state, never in saved form state, so a
+later plain submission is not attached.
 
 The UI polls `GET /api/status` every 5 s and `GET /api/jobs?status=queued,running` every 5 s as a fallback to SSE.
 
@@ -405,6 +512,20 @@ events: load → transcribe (unless ignore) → hum ("Analysing hum", "Encoding 
 
 Variations: `#/create` with N>1 → `POST /api/jobs {kind:"variations", params:{count:N, base:{…}, random_seeds}}`
 → `{group, jobs}`; the queue shows the group label on each card; library filters by `group=<group.id>`.
+
+Album from takes:
+```
+#/projects ──POST /api/projects {name}──▶ #/project/{id} ──POST /api/projects/{id}/tracks {name}──▶ tracks
+      │ "New take" on a track
+      ▼
+#/create?track=<track_id> ──GET /api/tracks/{id} (banner)──▶ POST /api/jobs {…, track_id} ──▶ 201 (job.take set)
+      │ or Library multi-select "Add to project…" ──▶ POST /api/tracks/{id}/takes {job_ids} (409 → confirm → move:true)
+      ▼
+#/project/{id}: rate takes ──PATCH /api/takes/{job_id} {thumb, stars, note}──▶ pick one ──PATCH /api/tracks/{id}
+                {chosen_job_id}──▶ reorder ──PUT /api/projects/{id}/order──▶ play chosen takes in order
+      ▼
+GET /api/projects/{id}/album.zip?format=flac|mp3 ──▶ <name>/01 Track.flac … + tracklist.json + tracklist.md
+```
 
 ## 6. Test fixtures — fake engine
 
