@@ -1,6 +1,6 @@
 // Router, header status, theme.
 import { api } from "./api.js";
-import { applyTheme, fill, h, store } from "./ui.js";
+import { applyTheme, fill, h, installMenuAutoClose, store } from "./ui.js";
 import "./player.js"; // builds the persistent player bar outside #view
 import { createView } from "./views/create.js";
 import { queueView } from "./views/queue.js";
@@ -53,6 +53,12 @@ async function route() {
     const active = href === `#/${name}` || (name === "song" && href === "#/library") || (name === "project" && href === "#/projects");
     if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
+  // The Generate dropdown: its summary is "current" when any item inside is, and it closes on every route change.
+  document.querySelectorAll("nav.main details.menu").forEach((d) => {
+    d.open = false;
+    const sum = d.querySelector("summary");
+    if (d.querySelector('.menu-list a[aria-current="page"]')) sum.setAttribute("aria-current", "page"); else sum.removeAttribute("aria-current");
+  });
   // Fresh container per route: a superseded view that paints after its await hits a detached node.
   const view = h("div", { class: "route" }, h("p", { class: "muted" }, "Loading…"));
   fill(document.getElementById("view"), view);
@@ -65,6 +71,7 @@ async function route() {
 }
 
 window.addEventListener("hashchange", route);
+installMenuAutoClose();
 if (!location.hash) location.replace("#/create");
 // Theme precedence: explicit local choice > server setting > system.
 api.settings().then((s) => { app.settings = s; if (store.get("theme", null) === null && s.theme) applyTheme(s.theme, { persist: false }); }).catch(() => {});

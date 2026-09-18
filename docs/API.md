@@ -451,7 +451,9 @@ transcription), so only a **queued or running** job pins one.
 
 ## 4. Frontend routing (hash-based)
 
-Single `index.html`; the router reads `location.hash`:
+Single `index.html`; the router reads `location.hash`. Header nav: `Generate ▾` (Create · Cover ·
+Hum) · Projects · Library · Settings, then Queue (with the pending-jobs badge) and the engine pill
+right-aligned; the current route's link (or the Generate summary) carries `aria-current="page"`.
 
 | Route | View |
 |-------|------|

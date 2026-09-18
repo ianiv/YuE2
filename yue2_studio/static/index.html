@@ -17,15 +17,19 @@
     <div class="top-inner">
       <a class="brand" href="#/create"><span class="brand-mark" aria-hidden="true"></span>YuE2 Studio</a>
       <nav class="main" aria-label="Main">
-        <a href="#/create">Create</a>
-        <a href="#/queue">Queue<span id="queue-count" class="badge-count" hidden></span></a>
-        <a href="#/library">Library</a>
+        <details class="menu" id="nav-generate">
+          <summary>Generate<span class="caret" aria-hidden="true">▾</span></summary>
+          <div class="menu-list">
+            <a href="#/create">Create</a>
+            <a href="#/cover">Cover</a>
+            <a href="#/hum">Hum</a>
+          </div>
+        </details>
         <a href="#/projects">Projects</a>
-        <a href="#/cover">Cover</a>
-        <a href="#/hum">Hum</a>
+        <a href="#/library">Library</a>
         <a href="#/settings">Settings</a>
+        <a href="#/queue" class="nav-queue">Queue<span id="queue-count" class="badge-count" hidden></span></a>
       </nav>
-      <span class="spacer"></span>
       <span id="engine-pill" class="pill" data-state="cold" title="Engine state"><span class="dot"></span><span class="txt">connecting…</span></span>
     </div>
   </header>
