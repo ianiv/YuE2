@@ -307,6 +307,11 @@ class SettingsModel(_Params):
     theme: Literal["system", "light", "dark"] = "system"
     # Auto-delete uploads no job references after this many days; None = never.
     prune_uploads_days: int | None = Field(default=None, ge=1, le=365)
+    # "Ask Claude": auto = claude CLI if installed, else the API when a key is set. The key is stored
+    # in plain text in data/app.db and never returned by the API (see api._public_settings).
+    assist_provider: Literal["auto", "cli", "api", "off"] = "auto"
+    assist_model: str = Field(default="", max_length=80)
+    anthropic_api_key: str = Field(default="", max_length=200)
 
     @field_validator("prune_uploads_days", mode="before")
     @classmethod
@@ -314,6 +319,11 @@ class SettingsModel(_Params):
         if isinstance(v, bool):
             raise ValueError("must be an integer number of days or null")
         return v
+
+    @field_validator("assist_model", "anthropic_api_key", mode="before")
+    @classmethod
+    def _stripped(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
 
 DEFAULT_SETTINGS = SettingsModel().model_dump()
@@ -400,6 +410,43 @@ class TakePatch(_Params):
     @classmethod
     def _ints(cls, v):
         return _no_bool(v)
+
+
+ASSIST_CONTEXT_LIMITS = {"title": 200, "style": 2000, "lyrics": 20000, "cot": 20, "cfg_scale": 20}
+
+
+class AssistBody(_Params):
+    """``POST /api/assist``: the user's request, which form it is for, and (with Refine on) the
+    current form fields Claude should edit rather than replace."""
+
+    prompt: str = Field(min_length=1, max_length=4000)
+    page: Literal["create", "cover", "hum"] = "create"
+    # Only the form's own keys, scalar values (no bools, no nesting), each capped at its field limit so
+    # a pasted novel cannot inflate the request.
+    context: dict[str, str | int | float | None] | None = None
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def _prompt(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def _context(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise ValueError("must be an object or null")
+        out = {}
+        for key, value in v.items():
+            if key not in ASSIST_CONTEXT_LIMITS:
+                continue
+            if isinstance(value, bool) or isinstance(value, dict | list):
+                raise ValueError(f"{key} must be a string, number or null")
+            if isinstance(value, str):
+                value = value[:ASSIST_CONTEXT_LIMITS[key]]
+            out[key] = value
+        return out
 
 
 def format_validation_error(error: ValidationError) -> str:

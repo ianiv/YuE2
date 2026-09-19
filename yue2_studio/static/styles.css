@@ -268,3 +268,8 @@ details[open].menu > summary { margin-bottom: 0; }
 .menu-list a { padding: 6px 10px; border-radius: 4px; color: var(--text); }
 .menu-list a:hover { background: var(--surface-2); text-decoration: none; }
 .project-picker { flex: 1 1 320px; }
+
+/* Claude assist (assistBox() in ui.js) */
+.panel.assist { gap: 8px; border-color: color-mix(in srgb, var(--accent) 40%, var(--accent-soft)); background: color-mix(in srgb, var(--accent-soft) 30%, var(--surface)); }
+.assist textarea { min-height: 0; }
+.assist .result { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; line-height: 1.4; }

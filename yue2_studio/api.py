@@ -21,7 +21,8 @@ from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from yue2_studio import __version__, audio, config, jobs, lora, projects, uploads
+from yue2_studio import __version__, assist, audio, config, jobs, lora, projects, uploads
+from yue2_studio.assist import AssistError, AssistUnavailable
 from yue2_studio.jobs import Conflict, Job, JobStore, NotFound, ValidationFailure
 from yue2_studio.worker import Worker
 
@@ -71,6 +72,14 @@ def install_error_handlers(app) -> None:
     @app.exception_handler(Conflict)
     async def _conflict(request: Request, exc: Conflict):
         return error_response(409, "conflict", str(exc))
+
+    @app.exception_handler(AssistUnavailable)
+    async def _assist_unavailable(request: Request, exc: AssistUnavailable):
+        return error_response(503, "assist_unavailable", "; ".join(exc.reasons))
+
+    @app.exception_handler(AssistError)
+    async def _assist_failed(request: Request, exc: AssistError):
+        return error_response(502, "assist_failed", str(exc))
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation(request: Request, exc: RequestValidationError):
@@ -222,6 +231,7 @@ async def get_status(request: Request):
         "cover": _cover_status(request),
         "hum": _hum_status(request),
         "loras": _loras(request),
+        "assist": assist.status(store.get_settings()),
         "ffmpeg": audio.ffmpeg_path() is not None,
         "fake": bool(state.fake),
         "version": __version__,
@@ -234,17 +244,49 @@ async def get_loras(request: Request):
     return _loras(request)
 
 
+def _public_settings(settings: dict) -> dict:
+    """``Settings`` as the API returns it: the API key never leaves the server, only whether one is
+    stored (``status.assist.api_key`` is the one that also counts ``ANTHROPIC_API_KEY``)."""
+    public = {k: v for k, v in settings.items() if k != "anthropic_api_key"}
+    public["has_api_key"] = bool(settings.get("anthropic_api_key"))
+    return public
+
+
 @router.get("/settings")
 async def get_settings(request: Request):
-    return _store(request).get_settings()
+    return _public_settings(_store(request).get_settings())
 
 
 @router.put("/settings")
 async def put_settings(request: Request):
+    """Partial update; ``anthropic_api_key`` absent = unchanged, ``""`` = cleared, text = saved."""
     body = await _json_body(request)
     if not isinstance(body, dict):
         raise ApiError(400, "validation_error", "settings body must be a JSON object")
-    return _store(request).update_settings(body)
+    return _public_settings(_store(request).update_settings(body))
+
+
+# ---------------------------------------------------------------------------------------------
+# assist ("Ask Claude")
+# ---------------------------------------------------------------------------------------------
+
+
+@router.post("/assist")
+async def post_assist(request: Request):
+    """Run the prompt through the resolved provider (blocking subprocess/HTTP, so off the loop);
+    503 ``assist_unavailable`` / 502 ``assist_failed`` come from the exception handlers."""
+    body = await _body(request, jobs.AssistBody)
+    settings = _store(request).get_settings()
+    result = await asyncio.to_thread(assist.assist, settings, prompt=body.prompt, page=body.page,
+                                     context=body.context)
+    return result.to_api()
+
+
+@router.post("/assist/test")
+async def post_assist_test(request: Request):
+    settings = _store(request).get_settings()
+    result = await asyncio.to_thread(assist.test, settings)
+    return result.to_api()
 
 
 # ---------------------------------------------------------------------------------------------

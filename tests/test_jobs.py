@@ -224,7 +224,8 @@ def test_delete_removes_group_when_last_member(store):
 def test_settings_defaults_and_partial_update(store):
     assert store.get_settings() == {"default_preset": "quality",
                                     "memory_budget_gib": config.DEFAULT_MEMORY_BUDGET_GIB,
-                                    "require_ac": False, "theme": "system", "prune_uploads_days": None}
+                                    "require_ac": False, "theme": "system", "prune_uploads_days": None,
+                                    "assist_provider": "auto", "assist_model": "", "anthropic_api_key": ""}
     updated = store.update_settings({"theme": "dark", "memory_budget_gib": 20})
     assert updated["theme"] == "dark" and updated["memory_budget_gib"] == 20
     assert updated["default_preset"] == "quality"

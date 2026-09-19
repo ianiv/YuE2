@@ -102,8 +102,34 @@ Cover is disabled (and the API answers 409) until the transcription models and f
 `#/settings` and `GET /api/status` say what is missing.
 
 **Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power, theme,
-plus a live engine panel (state, precision, memory, merged LoRAs, current job, model paths, the LoRA
-adapters found in `models/loras/` and why any of them is unusable).
+Claude assist (below), plus a live engine panel (state, precision, memory, merged LoRAs, current job,
+model paths, the LoRA adapters found in `models/loras/` and why any of them is unusable).
+
+### Claude assist
+
+Every generate page (Create, Cover, Hum) has an **Ask Claude** box: describe the song ("a bittersweet
+synth-pop duet about a long-distance call, 100 BPM") and Claude fills in the title, style tags,
+section-tagged lyrics and — on Create — the mode and CFG, with a one-line "if it comes out X, change
+Y" note. With **Refine** on, the current form fields are sent along and Claude edits them instead of
+starting over. The system prompt is `yue2_studio/assist_prompt.md` (the `yue2-prompt` skill adapted
+for the app); the reply is constrained to a JSON schema, so nothing needs parsing.
+
+Two providers, chosen in Settings (`auto` by default):
+
+- **`claude` CLI** — if [Claude Code](https://claude.com/claude-code) is installed and logged in,
+  nothing else is needed; the studio runs `claude -p` with your login (no MCP servers, skills or
+  hooks are loaded, and an exported `ANTHROPIC_API_KEY` is not passed through, so the call bills the
+  login). The default model is the CLI's own; set *Model* (e.g. `haiku`, `sonnet`) to override.
+- **Anthropic API** — paste an API key in Settings (or export `ANTHROPIC_API_KEY` before starting
+  the server; Settings wins when both are set). Default model `claude-sonnet-5`. `POST /api/assist/test`
+  (the *Test* button) checks the connection.
+
+What is sent: the system prompt, the page name, your request and — with Refine on — the current
+title/style/lyrics/mode/CFG. Nothing else (no audio, no job history). The key is stored **in plain
+text** in `data/app.db` and never returned by the API (`GET /api/settings` only reports
+`has_api_key`, which counts only the stored key); clear it with an empty value. `off` hides the box
+entirely; a missing CLI/key leaves it in place but disabled, with a tag and a hint saying why;
+`GET /api/status` → `assist` says which provider is active and why not.
 
 ### LoRA adapters
 
@@ -238,12 +264,13 @@ at `/api/docs` while the server runs): `GET /api/status`, `POST /api/jobs` (`cre
 `cover`, `variations`), `GET /api/jobs?status=&kind=&group=&limit=&offset=`, `GET|DELETE
 /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`, `GET /api/jobs/{id}/events` (SSE), song artifacts
 under `/api/songs/{id}/` (`audio.flac` with Range support, `audio.mp3`, `score.abc`, `plan.json`,
-`artifacts.zip`, `transcription/score.abc`), `POST /api/upload`, `GET|PUT /api/settings`.
+`artifacts.zip`, `transcription/score.abc`), `POST /api/upload`, `GET|PUT /api/settings`,
+`POST /api/assist` (Ask Claude) and `POST /api/assist/test`.
 
 ## Development
 
 ```bash
-uv run pytest                      # ~290 tests, < 15 s, no models or GPU needed (VAE-encoder tests use models/vae when present)
+uv run pytest                      # ~380 tests, < 15 s, no models or GPU needed (VAE-encoder tests use models/vae when present)
 uv run ruff check .                # lint (E, F, W, I, UP, B; line length 110)
 uv run yue2-studio --fake          # the real server with the fake engine
 uv run python scripts/mock_api.py  # standalone in-memory mock of docs/API.md on :8790 for UI work
@@ -283,7 +310,8 @@ MLX), `engine.py` (pipeline wrapper), `lora.py` (adapter discovery + weight merg
 sampler, a `CachedNAR` subclass), `vae_encoder.py` (MLX port of the VAE encoder) — the last three
 plus `engine.py` are the only modules importing `mlx` —, `jobs.py` (validation, SQLite store),
 `worker.py` (thread, cancellation, event bus, normalisation), `api.py` (routes), `audio.py`
-(ffmpeg, uploads, zip), `main.py` (app factory + CLI), `static/` (UI), `scripts/setup.py` (weights
+(ffmpeg, uploads, zip), `assist.py` + `assist_prompt.md` (Ask Claude: CLI / API providers, schema,
+system prompt), `main.py` (app factory + CLI), `static/` (UI), `scripts/setup.py` (weights
 + doctor), `scripts/smoke.py` / `scripts/hum_smoke.py` (one generation through the engine with
 timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md` (contract).
 

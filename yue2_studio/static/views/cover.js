@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
+import { assistBox, fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
 
 const TASKS = [["melody-full", "Melody → full", "Transcribe the melody, let YuE2 write the full arrangement. Recommended for covers."],
   ["melody-vocal", "Melody → vocal", "Transcribe the melody and follow it with the vocal line only."],
@@ -32,6 +32,16 @@ export async function coverView({ el, query, app }) {
     lyrics: h("textarea", { id: "c-lyrics", class: "lyrics", placeholder: "[Verse]\n…", required: true }, saved.lyrics),
     seed: seedField({ id: "c-seed", seed: saved.seed, random: saved.random_seed !== false, onChange: () => collect() }),
   };
+  // Claude assist: fills title/style/lyrics; applyFields returns the previous values so the box can undo.
+  function applyFields(fields) {
+    const prev = {};
+    for (const k of ["title", "style", "lyrics"]) if (k in fields) { prev[k] = f[k].value; f[k].value = fields[k] ?? ""; }
+    collect();
+    return prev;
+  }
+  const getContext = () => { const c = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value.trim() }; for (const k in c) if (!c[k]) delete c[k]; return c; };
+  const assist = assistBox({ page: "cover", app, getContext, apply: applyFields });
+  app.listeners.add(assist.onStatus);
   const taskHint = h("p", { class: "hint" });
   const taskSeg = h("div", { class: "seg", role: "group", "aria-label": "Task" }, TASKS.map(([v, l]) => h("button", { type: "button", dataset: { v }, onclick: () => setTask(v) }, l)));
   function setTask(v) { task = v; taskSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === task))); taskHint.textContent = TASKS.find((x) => x[0] === task)[2]; }
@@ -81,7 +91,7 @@ export async function coverView({ el, query, app }) {
   }
 
   const form = h("form", { class: "cols", onsubmit: onSubmit, oninput: collect },
-    h("div", { class: "stack" }, unavailable, drop, picker,
+    h("div", { class: "stack" }, unavailable, drop, picker, assist.el,
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Task"), taskSeg, taskHint),
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Title"), f.title),
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Style"), h("span", {}, "required")), f.style),
@@ -95,5 +105,5 @@ export async function coverView({ el, query, app }) {
   // Restore the last-used upload only if it still exists on the server — and only if the user has not
   // already dropped/recorded a fresh file while the list was loading.
   picker.refresh().then(() => { if (saved.upload_id && !upload && !dirty) { const u = picker.set(saved.upload_id); if (u) usePicked(u); else collect(); } });
-  return { unmount: () => app.listeners.delete(listener) };
+  return { unmount: () => { app.listeners.delete(listener); app.listeners.delete(assist.onStatus); } };
 }

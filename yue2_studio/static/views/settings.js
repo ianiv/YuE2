@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { applyTheme, fill, fmt, h, loraLabel, store, toast, toastError } from "../ui.js";
+import { applyTheme, confirmDialog, fill, fmt, h, loraLabel, store, toast, toastError } from "../ui.js";
 
 export async function settingsView({ el, app }) {
   let s;
@@ -11,17 +11,50 @@ export async function settingsView({ el, app }) {
     ac: h("input", { id: "st-ac", type: "checkbox", checked: !!s.require_ac }),
     prune: h("input", { id: "st-prune", type: "number", min: 1, max: 365, step: 1, value: s.prune_uploads_days === null || s.prune_uploads_days === undefined ? "" : s.prune_uploads_days, placeholder: "never", style: "width:120px" }),
     theme: h("select", { id: "st-theme", onchange: (e) => applyTheme(e.target.value) }, [["system", "Follow system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => h("option", { value: v, selected: v === (s.theme || "system") }, l))),
+    assistProvider: h("select", { id: "st-assist-provider" }, [["auto", "Auto — CLI if installed, else API key"], ["cli", "Claude CLI"], ["api", "API key"], ["off", "Off — hide the Ask Claude box"]].map(([v, l]) => h("option", { value: v, selected: v === (s.assist_provider || "auto") }, l))),
+    assistModel: h("input", { id: "st-assist-model", type: "text", maxlength: 80, value: s.assist_model || "", placeholder: "provider default — e.g. sonnet, claude-opus-5", autocomplete: "off" }),
+    // The key never comes back from the server: the field is blank and only sent when the user typed one.
+    apiKey: h("input", { id: "st-assist-key", type: "password", autocomplete: "new-password", placeholder: keyPlaceholder(s), "aria-label": "Anthropic API key" }),
   };
+  function keyPlaceholder(st) { return st.has_api_key ? "•••••• key saved" : "sk-ant-…"; }
+  /** The whole settings object from the form (validated; null + toast when a field is out of range). */
+  function body() {
+    const mem = Number(f.mem.value);
+    if (!(mem >= 4 && mem <= 44)) { toast("Memory budget must be between 4 and 44 GiB", "err"); return null; }
+    const prune = f.prune.value.trim() === "" ? null : Number(f.prune.value);
+    if (prune !== null && !(Number.isInteger(prune) && prune >= 1 && prune <= 365)) { toast("Auto-delete uploads must be 1–365 days (or blank for never)", "err"); return null; }
+    const b = { default_preset: f.preset.value, memory_budget_gib: mem, require_ac: f.ac.checked, theme: f.theme.value, prune_uploads_days: prune, assist_provider: f.assistProvider.value, assist_model: f.assistModel.value.trim() };
+    if (f.apiKey.value) b.anthropic_api_key = f.apiKey.value;
+    return b;
+  }
+  async function put(b, msg) {
+    s = await api.saveSettings(b); app.settings = s; applyTheme(s.theme);
+    f.apiKey.value = ""; f.apiKey.placeholder = keyPlaceholder(s);
+    if (msg) toast(msg, "ok");
+    if (app.refreshStatus) await app.refreshStatus(); // provider/key changes show up now, not on the next 5 s poll
+  }
   const save = h("button", { type: "submit", class: "primary" }, "Save settings");
+  const clearKey = h("button", { type: "button", class: "ghost sm", onclick: async () => {
+    if (!s.has_api_key && !f.apiKey.value) return toast("No API key is saved", "info");
+    if (!confirmDialog("Remove the saved Anthropic API key?")) return;
+    const b = body(); if (!b) return;
+    clearKey.disabled = true;
+    try { await put({ ...b, anthropic_api_key: "" }, "API key removed"); } catch (err) { toastError(err); }
+    clearKey.disabled = false;
+  } }, "Clear key");
+  const test = h("button", { type: "button", class: "sm", onclick: async () => {
+    const b = body(); if (!b) return;
+    test.disabled = true; test.textContent = "Testing…";
+    try { await put(b, null); const r = await api.testAssist(); toast(`Claude answered via ${r.provider}${r.model ? ` (${r.model})` : ""} in ${Number(r.seconds).toFixed(1)}s`, "ok"); }
+    catch (err) { toastError(err); }
+    test.disabled = false; test.textContent = "Test";
+  } }, "Test");
+  const assistStatus = h("span", { class: "hint" });
   const form = h("form", { class: "panel stack", onsubmit: async (e) => {
     e.preventDefault();
-    const mem = Number(f.mem.value);
-    if (!(mem >= 4 && mem <= 44)) return toast("Memory budget must be between 4 and 44 GiB", "err");
-    const prune = f.prune.value.trim() === "" ? null : Number(f.prune.value);
-    if (prune !== null && !(Number.isInteger(prune) && prune >= 1 && prune <= 365)) return toast("Auto-delete uploads must be 1–365 days (or blank for never)", "err");
+    const b = body(); if (!b) return;
     save.disabled = true;
-    try { s = await api.saveSettings({ default_preset: f.preset.value, memory_budget_gib: mem, require_ac: f.ac.checked, theme: f.theme.value, prune_uploads_days: prune }); app.settings = s; applyTheme(s.theme); toast("Settings saved", "ok"); }
-    catch (err) { toastError(err); }
+    try { await put(b, "Settings saved"); } catch (err) { toastError(err); }
     save.disabled = false;
   } },
     h("h3", {}, "Generation"),
@@ -33,11 +66,26 @@ export async function settingsView({ el, app }) {
       h("span", { class: "hint" }, "Uploads no job references are removed from data/uploads at startup and after each job; uploads a queued or running job needs are never touched. Manage them under Library → Uploads.")),
     h("h3", {}, "Appearance"),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Theme"), f.theme),
+    h("h3", {}, "Claude assist"),
+    h("label", { class: "field" }, h("span", { class: "lbl" }, "Provider"), f.assistProvider,
+      h("span", { class: "hint" }, "Fills the Create / Cover / Hum forms from a prompt. The CLI uses your Claude login; the API key is stored in data/app.db.")),
+    h("div", { class: "grid2" },
+      h("label", { class: "field" }, h("span", { class: "lbl" }, "Model"), f.assistModel),
+      h("label", { class: "field" }, h("span", { class: "lbl" }, "API key"), f.apiKey)),
+    h("div", { class: "row" }, test, clearKey, assistStatus),
     h("div", {}, save));
 
   const statusBox = h("dl", { class: "kv" });
   const modelsBox = h("dl", { class: "kv" });
+  function assistLine(st) {
+    const a = st && st.assist;
+    if (!a) return st ? "" : "offline";
+    const bits = [a.cli ? "CLI found" : "no CLI", a.api_key ? (s.has_api_key ? "key set" : "key set (env)") : "no key"]; // has_api_key = stored key only
+    if (a.provider) return [`via ${a.provider.toUpperCase()}${a.model ? ` (${a.model})` : ""}`, ...bits].join(" · ");
+    return (a.reasons && a.reasons.length ? a.reasons : ["unavailable", ...bits]).join(" · ");
+  }
   function paint(st) {
+    assistStatus.textContent = assistLine(st);
     if (!st) { fill(statusBox, h("dt", {}, "Server"), h("dd", { class: "muted" }, "offline")); return; }
     const e = st.engine, q = st.queue;
     fill(statusBox, 
