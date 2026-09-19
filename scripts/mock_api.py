@@ -50,7 +50,39 @@ TRACKS: dict[str, dict] = {}  # id -> {id, project_id, name, position, chosen_jo
 TAKES: dict[str, dict] = {}  # job_id -> {track_id, thumb, stars, note, added_at}
 SUBS: dict[str, list[asyncio.Queue]] = {}
 SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system",
-            "prune_uploads_days": None}
+            "prune_uploads_days": None, "assist_provider": "auto", "assist_model": "",
+            "anthropic_api_key": ""}
+ASSIST_FIELDS = {
+    "create": {
+        "title": "Kitchen Light",
+        "style": "English, indie folk, acoustic guitar strumming, stomping kick drum and tambourine, "
+                 "warm male lead vocal, group shout-along chorus, campfire feel, 118 BPM",
+        "lyrics": "[Intro]\nHey! Ho!\n\n[Verse 1]\nLeft the kitchen light on for you\nCoffee's cold but the "
+                  "kettle's new\nEvery creak of the floor's a song\nAbout the nights we got it wrong\n\n"
+                  "[Chorus]\nCome home, come home, the porch is warm\nWe'll ride it out, whatever storm\n"
+                  "Come home, come home, the light's still on\nI'll keep it burning till the dawn\n\n"
+                  "[Verse 2]\nThere's a dent where your bike leaned in\nA ring of dust where the pictures "
+                  "been\nI hum the tune you used to play\nA little flat but it's okay\n\n"
+                  "[Chorus]\nCome home, come home, the porch is warm\nWe'll ride it out, whatever storm\n"
+                  "Come home, come home, the light's still on\nI'll keep it burning till the dawn\n\n"
+                  "[Outro: acoustic guitar]",
+        "cot": "full",
+    },
+    "cover": {
+        "title": "Neon Rain (cover)",
+        "style": "Japanese city pop, smooth female vocal, slap bass, electric piano, brass stabs, glossy 80s "
+                 "production, 108 BPM",
+        "lyrics": "[Verse]\n街の灯り 雨に溶けて\n君の影を 追いかけて\n\n[Chorus]\nNeon rain, neon rain\n"
+                  "Carry me back to you again",
+    },
+    "hum": {
+        "title": "Hummed at Midnight",
+        "style": "dreamy indie pop, breathy female vocal, soft synth pads, brushed drums, intimate, 92 BPM",
+        "lyrics": "[Verse]\nHalf asleep I hum your name\nWindow fogged with morning rain\n\n[Chorus]\n"
+                  "Stay a little, stay a while\nLet the quiet make us smile",
+    },
+}
+ASSIST_NOTE = "if it comes out too polished, add `lo-fi, live room`; if the tempo drifts, put the BPM first"
 ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None, "loras": []}
 
 
@@ -307,7 +339,22 @@ def status() -> dict:
             "available": COVER_OK,
             "reasons": [] if COVER_OK else ["MERT-v2-FullSong not downloaded", "ffmpeg missing"],
         },
+        "assist": _assist_status(),
     }
+
+
+def _assist_status() -> dict:
+    """Mirrors ``assist.status``: auto = CLI (pretend installed) else API when a key is set."""
+    mode, key = SETTINGS["assist_provider"], bool(SETTINGS["anthropic_api_key"])
+    model = SETTINGS["assist_model"] or None
+    base = {"provider": None, "cli": True, "api_key": key, "model": model, "reasons": []}
+    if mode == "off":
+        return {**base, "reasons": ["assist is turned off in Settings"]}
+    if mode in ("auto", "cli"):
+        return {**base, "provider": "cli"}
+    if key:
+        return {**base, "provider": "api", "model": model or "claude-sonnet-5"}
+    return {**base, "model": None, "reasons": ["no API key: add one in Settings or set ANTHROPIC_API_KEY"]}
 
 
 @app.get("/api/loras")
@@ -879,9 +926,15 @@ async def prune_uploads(req: Request) -> dict:
     return {"deleted": deleted, "skipped": skipped}
 
 
+def _public_settings() -> dict:
+    public = {k: v for k, v in SETTINGS.items() if k != "anthropic_api_key"}
+    public["has_api_key"] = bool(SETTINGS["anthropic_api_key"])
+    return public
+
+
 @app.get("/api/settings")
 def get_settings() -> dict:
-    return SETTINGS
+    return _public_settings()
 
 
 @app.put("/api/settings")
@@ -889,8 +942,45 @@ async def put_settings(req: Request):
     body = await req.json()
     if "memory_budget_gib" in body and not 4 <= float(body["memory_budget_gib"]) <= 44:
         return err(400, "validation_error", "memory_budget_gib must be 4..44")
-    SETTINGS.update({k: v for k, v in body.items() if k in SETTINGS})
-    return SETTINGS
+    if body.get("assist_provider") not in (None, "auto", "cli", "api", "off"):
+        return err(400, "validation_error", "assist_provider must be one of auto, cli, api, off")
+    SETTINGS.update({k: v.strip() if isinstance(v, str) else v for k, v in body.items() if k in SETTINGS})
+    return _public_settings()
+
+
+@app.post("/api/assist")
+async def post_assist(req: Request):
+    body = await req.json()
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if not isinstance(prompt, str) or not prompt.strip():
+        return err(400, "validation_error", "prompt: must be a non-empty string")
+    page = body.get("page") or "create"
+    if page not in ASSIST_FIELDS:
+        return err(400, "validation_error", "page: must be one of create, cover, hum")
+    status = _assist_status()
+    if status["provider"] is None:
+        return err(503, "assist_unavailable", "; ".join(status["reasons"]))
+    await asyncio.sleep(0.6)
+    fields = dict(ASSIST_FIELDS[page])
+    context = body.get("context") or {}
+    if isinstance(context, dict) and any(context.get(k) for k in ("title", "style", "lyrics")):
+        # "refine": only the fields that change; keep the user's title so the edit is visible. On create an
+        # explicit cfg_scale null is legitimate: it resets the CFG field to the engine default.
+        fields = {"style": fields["style"], "lyrics": fields["lyrics"]}
+        if page == "create" and context.get("cfg_scale") not in (None, ""):
+            fields["cfg_scale"] = None
+    return {"fields": fields, "notes": ASSIST_NOTE, "provider": status["provider"],
+            "model": status["model"] or "claude-haiku-4-5-20251001", "seconds": 0.6}
+
+
+@app.post("/api/assist/test")
+async def post_assist_test():
+    status = _assist_status()
+    if status["provider"] is None:
+        return err(503, "assist_unavailable", "; ".join(status["reasons"]))
+    await asyncio.sleep(0.4)
+    return {"fields": {"title": "ok"}, "notes": None, "provider": status["provider"],
+            "model": status["model"] or "claude-haiku-4-5-20251001", "seconds": 0.4}
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

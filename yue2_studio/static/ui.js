@@ -456,3 +456,69 @@ export async function trackBanner(trackId, { onDismiss = null } = {}) {
     h("button", { type: "button", class: "ghost sm", title: "Submit without attaching to this track", "aria-label": "Dismiss", onclick: () => { el.remove(); onDismiss && onDismiss(); } }, "✕"));
   return { el, track };
 }
+
+// -- Claude assist ---------------------------------------------------------------------------
+
+const ASSIST_LABELS = { title: "title", style: "style", lyrics: "lyrics", cot: "mode", cfg_scale: "CFG" };
+
+/**
+ * "Ask Claude" panel for the Create/Cover/Hum forms: a prompt, POST /api/assist, and the answer's
+ * fields pushed into the form through `apply(fields)`, which sets whatever keys are present and
+ * returns the previous values for those keys (that snapshot drives Undo/Redo). `getContext()` is the
+ * current form state, sent only when "Refine" is on. Returns {el, onStatus}; views add onStatus to
+ * app.listeners and delete it in unmount so the provider tag / hint follow /api/status.
+ */
+export function assistBox({ page, app, getContext, apply }) {
+  let busy = false, available = false;
+  const tag = h("span", { class: "tag" }, "…");
+  const prompt = h("textarea", { rows: 2, "aria-label": "Ask Claude", placeholder: "Describe the song — genre, mood, vocals, language, tempo, length…",
+    onkeydown: (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ask(); } } });
+  const refine = h("input", { type: "checkbox", checked: !!store.get("assist.refine", false), onchange: () => store.set("assist.refine", refine.checked) });
+  const btn = h("button", { type: "button", class: "primary sm", onclick: ask }, "Ask Claude");
+  const hint = h("div", { class: "hint", hidden: true });
+  const result = h("div", { class: "result", hidden: true });
+  const el = h("div", { class: "panel assist stack" },
+    h("div", { class: "row between" }, h("b", {}, "Ask Claude"), tag),
+    prompt,
+    h("div", { class: "row between" }, h("label", { class: "check small", title: "Send the current fields so Claude edits them instead of starting over" }, refine, "Refine what's already in the form"), btn),
+    hint, result);
+
+  function onStatus(status) {
+    const a = status && status.assist;
+    available = !!(a && a.provider);
+    // "off" comes from the poll's reasons so another tab's provider change shows up here; app.settings is the fallback.
+    const off = !available && (a && a.reasons && a.reasons.length ? a.reasons.some((r) => /turned off in settings/i.test(r)) : !!(app.settings && app.settings.assist_provider === "off"));
+    el.hidden = off; // Off = no box at all; it comes back on the next poll / settings save
+    tag.textContent = available ? a.provider.toUpperCase() : "unavailable";
+    tag.className = `tag${available ? " ok" : ""}`;
+    tag.title = available && a.model ? `model ${a.model}` : "";
+    hint.hidden = available;
+    if (!status) fill(hint, "Waiting for the server…");
+    else if (!available) fill(hint, "Install the Claude CLI or add an API key in ", h("a", { href: "#/settings" }, "Settings"), ".",
+      a && a.reasons && a.reasons.length ? h("ul", { style: "margin:2px 0 0 16px" }, a.reasons.map((r) => h("li", {}, r))) : null);
+    prompt.disabled = !available;
+    btn.disabled = busy || !available;
+  }
+  async function ask() {
+    const text = prompt.value.trim();
+    if (!text) return prompt.focus();
+    if (busy || !available) return;
+    busy = true; btn.disabled = true; btn.textContent = "Thinking…";
+    try {
+      const ctx = refine.checked ? getContext() : null;
+      const r = await api.assist({ prompt: text, page, context: ctx && Object.keys(ctx).length ? ctx : null });
+      const fields = r.fields || {};
+      let snap = Object.keys(fields).length ? apply(fields) : null; // previous values of what the view changed; Undo swaps them back (and becomes Redo)
+      const same = (x, y) => (x === null || x === undefined ? "" : String(x)) === (y === null || y === undefined ? "" : String(y));
+      const keys = Object.keys(snap || {}).filter((k) => !same(snap[k], fields[k])); // name only what actually changed
+      const undo = keys.length ? h("button", { type: "button", class: "ghost sm", onclick: () => { snap = apply(snap); undo.textContent = undo.textContent === "Undo" ? "Redo" : "Undo"; } }, "Undo") : null;
+      fill(result, r.notes ? h("span", {}, r.notes) : null,
+        h("span", { class: "muted" }, keys.length ? `Applied: ${keys.map((k) => ASSIST_LABELS[k] || k).join(", ")}` : "No changes"), undo,
+        h("span", { class: "muted num" }, `${r.provider}${r.model ? ` · ${r.model}` : ""} · ${Number(r.seconds).toFixed(1)}s`));
+      result.hidden = false;
+    } catch (e) { toastError(e); }
+    busy = false; btn.textContent = "Ask Claude"; btn.disabled = !available; // prompt stays: refinements are one edit away
+  }
+  onStatus(app.status);
+  return { el, onStatus };
+}

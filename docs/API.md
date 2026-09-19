@@ -17,6 +17,8 @@ Both sides implement this document independently; any change here must be made h
 | 404  | `not_found`          | unknown job/group/upload/project/track id, missing artifact (e.g. `plan.json` for a failed job), `PATCH/DELETE /api/takes/{id}` for a job that is not a take |
 | 409  | `conflict`           | cancel of done/failed/cancelled job; delete of running job; cover when `status.cover.available=false`; attaching a job that is already a take of another track (without `move`); choosing a take that is not `done`; album export with nothing exportable |
 | 413  | `too_large`          | upload > 200 MB |
+| 502  | `assist_failed`      | `POST /api/assist[/test]`: Claude ran but failed (not logged in, key rejected, rate limited, timeout, unusable output); `message` is readable as-is |
+| 503  | `assist_unavailable` | `POST /api/assist[/test]` when `status.assist.provider` is null; `message` = `status.assist.reasons` joined with `; ` |
 | 503  | `engine_unavailable` | engine failed to load / models missing (`status.models.present=false`); `audio.mp3` or `album.zip?format=mp3` without ffmpeg |
 | 500  | `internal_error`     | anything else |
 
@@ -245,6 +247,7 @@ and immediately before `done` with the terminal status.
   "cover":   {"available": false, "reasons": ["MERT-v2-FullSong not downloaded"]},
   "hum":     {"available": true, "reasons": [], "adapters": ["hum_adapter_v1_combined"]},
   "loras":   {"dir": "/abs/models/loras", "adapters": [LoraAdapter, …]},
+  "assist":  {"provider": "cli", "cli": true, "api_key": false, "model": null, "reasons": []},
   "ffmpeg":  true,
   "fake":    false,
   "version": "0.1.0"
@@ -257,14 +260,29 @@ memory sampled by the worker at stage boundaries, so it lags slightly). `queue.r
 `cover.available` are reported true so jobs can be submitted). `engine.loras` is the stack merged into the resident
 pipeline (`[]` when cold or none); `loras` rescans `models/loras/` on every call (header reads only).
 
+`assist` says whether "Ask Claude" can run: `provider ∈ cli|api|null` is what a request would use right now
+(`settings.assist_provider` resolved against what is installed: `auto` = the `claude` CLI when on PATH, else the
+API when a key is set), `cli` = the CLI is on PATH, `api_key` = a key is set (Settings or `ANTHROPIC_API_KEY`),
+`model` = `settings.assist_model` or the provider default (`null` for the CLI, which picks its own;
+`claude-sonnet-5` for the API), `reasons` = why `provider` is null (`[]` otherwise), e.g. `claude CLI not found on
+PATH`, `no API key: add one in Settings or set ANTHROPIC_API_KEY`, `assist is turned off in Settings`.
+
 ### Settings
 
-`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system", "prune_uploads_days": null}`
+`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system", "prune_uploads_days": null,
+"assist_provider": "auto", "assist_model": "", "has_api_key": false}`
 (`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
 total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`; `prune_uploads_days` integer 1..365 or `null` = off:
 uploads no job references and older than that are deleted at server startup and after every job finishes, exactly
 as `POST /api/uploads/prune {"unused": true, "older_than_days": N}` would). `PUT` accepts any
 subset, ignores unknown keys, and returns the full object; a rejected patch (400) changes nothing.
+
+| field | type | notes |
+|-------|------|-------|
+| `assist_provider` | enum(auto\|cli\|api\|off) | `auto` (default) = `claude` CLI if installed, else the API when a key is set |
+| `assist_model` | str | ≤ 80 chars, stripped; `""` = provider default (CLI: its own default; API: `claude-sonnet-5`). The API provider forces a `tool_use`, which `claude-fable-5-1` / the Mythos models reject — the API's 400 then surfaces as-is in a 502 `assist_failed` |
+| `anthropic_api_key` | str | **write-only**, ≤ 200 chars, stripped; stored in plain text in `data/app.db`. `PUT` semantics: key absent → unchanged, `""` → cleared, non-empty → saved. Never present in a response |
+| `has_api_key` | bool | **read-only**: a key is *stored* in Settings. The `ANTHROPIC_API_KEY` env fallback is not counted here — `status.assist.api_key` reports stored-or-env |
 
 ### Upload (`GET /api/uploads`)
 
@@ -444,6 +462,36 @@ transcription), so only a **queued or running** job pins one.
 
 ### `GET /api/settings` → 200 `Settings`.  `PUT /api/settings` body = partial `Settings` → 200 full `Settings` | 400.
 
+Responses never contain `anthropic_api_key`; they carry `has_api_key` instead (see the Settings model).
+
+### `POST /api/assist` — "Ask Claude"
+
+Body `{"prompt": str, "page": enum(create|cover|hum) = "create", "context": {title?, style?, lyrics?, cot?, cfg_scale?} | null}`.
+`prompt` is 1..4000 chars after stripping (400 otherwise). `context` is the current form when the user asked to
+*refine* it: Claude is then told to return only the fields that change. Only its `title`/`style`/`lyrics`/`cot`/
+`cfg_scale` keys are used (others dropped), values must be scalars (string, number or null — bools and nested
+values are a 400) and strings are capped at the field limits. Runs the resolved provider
+(`status.assist.provider`) with a fixed system prompt (`yue2_studio/assist_prompt.md`, an adaptation of the
+`yue2-prompt` skill) and a JSON schema, so the reply is always structured. Blocking on the server for the duration of
+the model call (typically 5–30 s).
+
+→ 200
+```json
+{"fields": {"title": "…", "style": "…", "lyrics": "[Intro]\n…", "cot": "full"},
+ "notes": "if it comes out too polished, add `lo-fi, live room`", "provider": "cli",
+ "model": "claude-haiku-4-5-20251001", "seconds": 12.3}
+```
+`fields` holds only the keys Claude set (strings stripped, empty strings and nulls dropped; `cot`/`cfg_scale` never on
+`cover`/`hum`), each within the form's limits (title ≤ 200, style ≤ 2000, lyrics ≤ 20000, `cfg_scale` 0..20). One
+exception: on `create` an explicit `"cfg_scale": null` is kept — it means "back to the engine default", so a Refine
+can reset the CFG field.
+`notes` is one line or `null`; `model` is the model that answered (`null` if unknown); `seconds` is wall time.
+| 400 `validation_error` | 503 `assist_unavailable` | 502 `assist_failed`.
+
+### `POST /api/assist/test` → same 200 shape (a tiny fixed request, `fields` ≈ `{"title": "ok"}`) | 503 | 502.
+
+The Settings page's "Test" button: proves the provider works end to end with the current settings. No body.
+
 ### Static
 
 `GET /` → `static/index.html` (also for any non-`/api` path without extension, so hash routing needs nothing extra).
@@ -466,6 +514,10 @@ right-aligned; the current route's link (or the Generate summary) carries `aria-
 | `#/project/{id}` | `GET /api/projects/{id}`: editable name/description, "Play album" queues the chosen takes in the bottom player bar (playback survives navigation and reloads of the page), Export ZIP (FLAC / MP3 when `status.ffmpeg`), draggable tracklist (`PUT …/order`), per-track takes with thumbs/stars/note, Choose, Detach, "New take" → `#/create?track=`, `#/cover?track=`, `#/hum?track=` |
 | `#/settings` | settings drawer/page |
 
+`#/create`, `#/cover` and `#/hum` carry an "Ask Claude" box (prompt + *Refine current form* toggle → `POST
+/api/assist`; hidden when `assist_provider` is `off`, otherwise rendered disabled with a tag and a hint from
+`status.assist.reasons` when `status.assist.provider` is null) that fills the form fields and shows `notes`.
+
 `#/create`, `#/cover` and `#/hum` read `?track=<track_id>` (`GET /api/tracks/{id}` for the banner "New take for
 Project › Track") and send it as `track_id`; it lives only in that page's state, never in saved form state, so a
 later plain submission is not attached.
@@ -473,6 +525,14 @@ later plain submission is not attached.
 The UI polls `GET /api/status` every 5 s and `GET /api/jobs?status=queued,running` every 5 s as a fallback to SSE.
 
 ## 5. Flows
+
+Ask Claude (any generate page):
+```
+#/create|cover|hum  ──POST /api/assist {prompt, page, context?}──▶ 200 {fields, notes}
+      │ fields are written into the form (only the returned keys; Refine keeps the rest), notes shown under the box
+      ▼
+user edits / submits as usual ──POST /api/jobs──▶ 201 {job}
+```
 
 Regenerate from score:
 ```

@@ -12,8 +12,9 @@ import { settingsView } from "./views/settings.js";
 import { projectsView } from "./views/projects.js";
 import { projectView } from "./views/project.js";
 
-export const app = { status: null, settings: null, listeners: new Set() };
+export const app = { status: null, settings: null, listeners: new Set(), refreshStatus: null };
 
+/** Poll /api/status once and notify listeners; also `app.refreshStatus` so Settings can refresh right after a PUT. */
 async function refreshStatus() {
   const pill = document.getElementById("engine-pill"), count = document.getElementById("queue-count");
   try {
@@ -75,6 +76,7 @@ installMenuAutoClose();
 if (!location.hash) location.replace("#/create");
 // Theme precedence: explicit local choice > server setting > system.
 api.settings().then((s) => { app.settings = s; if (store.get("theme", null) === null && s.theme) applyTheme(s.theme, { persist: false }); }).catch(() => {});
+app.refreshStatus = refreshStatus;
 refreshStatus();
 setInterval(refreshStatus, 5000);
 route();

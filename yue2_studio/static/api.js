@@ -53,6 +53,9 @@ export const api = {
   attachTakes: (trackId, jobIds, move = false) => request("POST", `/api/tracks/${trackId}/takes`, { job_ids: jobIds, move }),
   detachTake: (jobId) => request("DELETE", `/api/takes/${jobId}`),
   patchTake: (jobId, patch) => request("PATCH", `/api/takes/${jobId}`, patch),
+  // Claude assist (fills the Create/Cover/Hum forms from a prompt)
+  assist: (body) => request("POST", "/api/assist", body),
+  testAssist: () => request("POST", "/api/assist/test"),
   text: async (path) => {
     const res = await fetch(path);
     if (!res.ok) {

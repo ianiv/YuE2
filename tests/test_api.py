@@ -14,7 +14,7 @@ import pytest
 from conftest import BASE, Api
 
 from yue2_studio import api as api_module
-from yue2_studio import audio
+from yue2_studio import assist, audio
 from yue2_studio.fake import FakeEngine
 
 JOB_KEYS = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps", "loras",
@@ -59,8 +59,11 @@ async def test_status_shape(client, home):
     r = await client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"engine", "queue", "presets", "models", "cover", "hum", "loras", "ffmpeg", "fake",
-                         "version"}
+    assert set(body) == {"engine", "queue", "presets", "models", "cover", "hum", "loras", "assist", "ffmpeg",
+                         "fake", "version"}
+    assert set(body["assist"]) == {"provider", "cli", "api_key", "model", "reasons"}
+    assert body["assist"]["provider"] in ("cli", "api", None)
+    assert isinstance(body["assist"]["cli"], bool) and isinstance(body["assist"]["api_key"], bool)
     assert body["hum"] == {"available": True, "reasons": [], "adapters": []}
     assert body["engine"] == {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None,
                               "loras": []}
@@ -92,14 +95,18 @@ async def test_status_reflects_queue_and_engine(client, api, app):
     assert body["engine"]["state"] == "ready" and body["engine"]["memory_gib"] > 0
 
 
-async def test_settings_get_and_partial_put(client):
+DEFAULT_PUBLIC_SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
+                           "theme": "system", "prune_uploads_days": None, "assist_provider": "auto",
+                           "assist_model": "", "has_api_key": False}
+
+
+async def test_settings_get_and_partial_put(client, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     r = await client.get("/api/settings")
-    assert r.json() == {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                        "theme": "system", "prune_uploads_days": None}
+    assert r.json() == DEFAULT_PUBLIC_SETTINGS
     r = await client.put("/api/settings", json={"theme": "dark"})
     assert r.status_code == 200
-    assert r.json() == {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                        "theme": "dark", "prune_uploads_days": None}
+    assert r.json() == {**DEFAULT_PUBLIC_SETTINGS, "theme": "dark"}
     assert (await client.get("/api/settings")).json()["theme"] == "dark"  # persisted
     r = await client.put("/api/settings", json={"bogus": 1})  # unknown keys ignored
     assert r.status_code == 200 and "bogus" not in r.json()
@@ -107,6 +114,33 @@ async def test_settings_get_and_partial_put(client):
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
     r = await client.put("/api/settings", json=[1])
     assert r.status_code == 400
+
+
+async def test_settings_api_key_is_write_only(client, app, monkeypatch):
+    """The key is never echoed; absent = unchanged, "" = cleared, text = saved."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    r = await client.get("/api/settings")
+    assert "anthropic_api_key" not in r.json() and r.json()["has_api_key"] is False
+    r = await client.put("/api/settings", json={"anthropic_api_key": "  sk-ant-test  ",
+                                                "assist_provider": "api", "assist_model": " claude-opus-5 "})
+    assert r.status_code == 200, r.text
+    assert "anthropic_api_key" not in r.json()
+    assert r.json()["has_api_key"] is True and r.json()["assist_provider"] == "api"
+    assert r.json()["assist_model"] == "claude-opus-5"
+    assert app.state.store.get_settings()["anthropic_api_key"] == "sk-ant-test"  # stored stripped
+    r = await client.put("/api/settings", json={"theme": "light"})  # key absent → unchanged
+    assert r.json()["has_api_key"] is True
+    assert app.state.store.get_settings()["anthropic_api_key"] == "sk-ant-test"
+    r = await client.put("/api/settings", json={"anthropic_api_key": ""})  # "" → cleared
+    assert r.json()["has_api_key"] is False
+    assert app.state.store.get_settings()["anthropic_api_key"] == ""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")  # env fallback: usable, but not a *stored* key
+    assert (await client.get("/api/settings")).json()["has_api_key"] is False
+    assert (await client.get("/api/status")).json()["assist"]["api_key"] is True
+    for bad in ({"assist_provider": "openai"}, {"assist_model": "x" * 81}, {"anthropic_api_key": "k" * 201},
+                {"assist_model": 3}):
+        r = await client.put("/api/settings", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
 
 
 @pytest.mark.parametrize(("patch", "ok"), [
@@ -133,6 +167,95 @@ async def test_settings_validation_bounds(client, patch, ok):
         assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
         assert next(iter(patch)) in r.json()["error"]["message"]
         assert (await client.get("/api/settings")).json() == before  # rejected patch changes nothing
+
+
+# -- assist ------------------------------------------------------------------------------------
+
+
+async def test_assist_returns_fields(client, monkeypatch):
+    seen = {}
+
+    def fake_assist(settings, *, prompt, page, context):
+        seen.update(settings=settings, prompt=prompt, page=page, context=context)
+        return assist.AssistResult(fields={"title": "Ok", "style": "pop", "lyrics": "[Verse]\nla"},
+                                   notes="if it drags, raise the BPM", provider="cli", model="claude-x",
+                                   seconds=1.5)
+
+    monkeypatch.setattr(assist, "assist", fake_assist)
+    r = await client.post("/api/assist", json={"prompt": "  a song  ", "page": "cover",
+                                               "context": {"style": "old", "junk": 1}})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"fields": {"title": "Ok", "style": "pop", "lyrics": "[Verse]\nla"},
+                        "notes": "if it drags, raise the BPM", "provider": "cli", "model": "claude-x",
+                        "seconds": 1.5}
+    assert seen["prompt"] == "a song" and seen["page"] == "cover"
+    assert seen["context"] == {"style": "old"}  # unknown keys dropped
+    assert seen["settings"]["assist_provider"] == "auto"
+    r = await client.post("/api/assist", json={"prompt": "x"})  # page defaults to create, context None
+    assert r.status_code == 200 and seen["page"] == "create" and seen["context"] is None
+
+
+async def test_assist_validation(client, monkeypatch):
+    monkeypatch.setattr(assist, "assist", lambda *a, **k: pytest.fail("must not run"))
+    for body in ({"prompt": ""}, {"prompt": "   "}, {}, {"prompt": "x", "page": "library"},
+                 {"prompt": "x" * 4001}, {"prompt": "x", "context": [1]}, {"prompt": "x", "context": "s"},
+                 {"prompt": "x", "context": {"title": True}}, {"prompt": "x", "context": {"lyrics": ["a"]}},
+                 {"prompt": "x", "context": {"style": {"a": 1}}}, [1]):
+        r = await client.post("/api/assist", json=body)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", body
+
+
+async def test_assist_context_is_filtered_and_capped(client, monkeypatch):
+    seen = {}
+
+    def fake_assist(settings, *, prompt, page, context):
+        seen["context"] = context
+        return assist.AssistResult(fields={}, notes=None, provider="cli", model=None, seconds=0.0)
+
+    monkeypatch.setattr(assist, "assist", fake_assist)
+    r = await client.post("/api/assist", json={"prompt": "x", "context": {
+        "title": "t" * 300, "style": "s", "lyrics": None, "cot": "full", "cfg_scale": 1.5, "seed": 4,
+        "junk": "dropped"}})
+    assert r.status_code == 200, r.text
+    assert seen["context"] == {"title": "t" * 200, "style": "s", "lyrics": None, "cot": "full",
+                               "cfg_scale": 1.5}
+    r = await client.post("/api/assist", json={"prompt": "x", "context": {"seed": 4}})
+    assert r.status_code == 200 and seen["context"] == {}
+
+
+async def test_assist_unavailable_and_failed(client, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    await client.put("/api/settings", json={"assist_provider": "off"})
+    r = await client.post("/api/assist", json={"prompt": "x"})  # real resolve(): off → 503
+    assert r.status_code == 503
+    assert r.json()["error"] == {"code": "assist_unavailable", "message": "assist is turned off in Settings"}
+    r = await client.post("/api/assist/test")
+    assert r.status_code == 503 and r.json()["error"]["code"] == "assist_unavailable"
+
+    def boom(settings, **kw):
+        raise assist.AssistError("claude CLI: Not logged in")
+
+    monkeypatch.setattr(assist, "assist", boom)
+    r = await client.post("/api/assist", json={"prompt": "x"})
+    assert r.status_code == 502
+    assert r.json()["error"] == {"code": "assist_failed", "message": "claude CLI: Not logged in"}
+
+    def unavailable(settings, **kw):
+        raise assist.AssistUnavailable(["claude CLI not found on PATH", "no API key"])
+
+    monkeypatch.setattr(assist, "assist", unavailable)
+    r = await client.post("/api/assist", json={"prompt": "x"})
+    assert r.status_code == 503
+    assert r.json()["error"]["message"] == "claude CLI not found on PATH; no API key"
+
+
+async def test_assist_test_endpoint(client, monkeypatch):
+    monkeypatch.setattr(assist, "test", lambda settings: assist.AssistResult(
+        fields={"title": "ok"}, notes=None, provider="api", model="claude-sonnet-5", seconds=0.4))
+    r = await client.post("/api/assist/test")
+    assert r.status_code == 200
+    assert r.json() == {"fields": {"title": "ok"}, "notes": None, "provider": "api",
+                        "model": "claude-sonnet-5", "seconds": 0.4}
 
 
 async def test_default_preset_setting_applies_to_submits(client, api):

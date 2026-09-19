@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, h, loraPicker, presetPicker, rememberGroup, seedField, store, toast, toastError, trackBanner } from "../ui.js";
+import { assistBox, fill, h, loraPicker, presetPicker, rememberGroup, seedField, store, toast, toastError, trackBanner } from "../ui.js";
 import { liveCard, resultCard } from "./jobcard.js";
 
 const RECENT_MAX = 20;
@@ -47,6 +47,18 @@ export async function createView({ el, query, app }) {
   loras.addEventListener("input", updateInstHint); updateInstHint();
   const onStatus = (s) => { if (s && s.loras) { adapters = s.loras.adapters; loras.update(adapters); updateInstHint(); } };
   app.listeners.add(onStatus);
+  // Claude assist: fills title/style/lyrics/mode/CFG; applyFields returns the previous values so the box can undo.
+  function applyFields(fields) {
+    const prev = {};
+    for (const k of ["title", "style", "lyrics"]) if (k in fields) { prev[k] = f[k].value; f[k].value = fields[k] ?? ""; }
+    if ("cfg_scale" in fields) { prev.cfg_scale = f.cfg.value === "" ? null : Number(f.cfg.value); f.cfg.value = fields.cfg_scale === null || fields.cfg_scale === undefined ? "" : fields.cfg_scale; }
+    if ("cot" in fields) { prev.cot = cot; const b = cotSeg.querySelector(`[data-m="${fields.cot}"]`); if (b) b.click(); }
+    collect();
+    return prev;
+  }
+  const getContext = () => { const c = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value.trim(), cot, cfg_scale: f.cfg.value === "" ? null : Number(f.cfg.value) }; for (const k in c) if (c[k] === "" || c[k] === null) delete c[k]; return c; };
+  const assist = assistBox({ page: "create", app, getContext, apply: applyFields });
+  app.listeners.add(assist.onStatus);
   const abcDetails = h("details", { hidden: cot === "off", open: !!saved.abc }, h("summary", {}, "Supply an ABC score (optional)"),
     h("p", { class: "hint" }, "Paste an ABC score (or load a .abc/.txt file) to skip planning; the engine follows it. Not allowed with mode “off”."),
     h("label", { class: "row small" }, "Load file", h("input", { id: "f-abc-file", type: "file", accept: ".abc,.txt,text/plain", style: "width:auto", onchange: async (e) => {
@@ -62,7 +74,7 @@ export async function createView({ el, query, app }) {
   const insertTag = (tag) => { const t = f.lyrics, s = t.selectionStart, v = t.value; const pre = v.slice(0, s), post = v.slice(t.selectionEnd); const nl = !pre ? "" : pre.endsWith("\n\n") ? "" : pre.endsWith("\n") ? "\n" : "\n\n"; t.value = pre + nl + tag + "\n" + post; t.focus(); t.selectionStart = t.selectionEnd = (pre + nl + tag + "\n").length; };
 
   const form = h("form", { class: "stack", onsubmit: onSubmit },
-    h("div", { class: "stack" },
+    h("div", { class: "stack" }, assist.el,
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Title"), f.title),
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Style"), h("span", {}, "required")), f.style),
       h("div", { class: "chips", "aria-label": "Genre suggestions" }, GENRES.map((g) => h("button", { type: "button", class: "chip", onclick: () => { f.style.value = f.style.value.trim() ? f.style.value.replace(/,?\s*$/, ", ") + g : g; f.style.focus(); } }, g))),
@@ -157,5 +169,5 @@ export async function createView({ el, query, app }) {
     } catch (err) { toastError(err); }
     submit.disabled = false; // queue another take right away
   }
-  return { unmount() { clearInterval(tick); app.listeners.delete(onStatus); live.forEach((c) => c.close()); } };
+  return { unmount() { clearInterval(tick); app.listeners.delete(onStatus); app.listeners.delete(assist.onStatus); live.forEach((c) => c.close()); } };
 }

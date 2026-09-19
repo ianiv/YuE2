@@ -2,6 +2,38 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — Claude assist
+
+### Added
+- **Ask Claude** (backend). `POST /api/assist {prompt, page, context?}` fills the Create / Cover /
+  Hum form from a description: Claude answers under a fixed system prompt
+  (`yue2_studio/assist_prompt.md`, the `yue2-prompt` skill adapted for the app — style-tag order,
+  section-tagged lyrics, mode/CFG guidance, per-page rules) and a JSON schema, so the reply is
+  always `{fields, notes, provider, model, seconds}`; `fields` are stripped, length-checked and
+  limited to `title`/`style`/`lyrics` on cover/hum. With `context` (the *Refine* toggle) the
+  current form is sent and Claude returns only the fields that change. `POST /api/assist/test` is
+  the Settings "Test" button. New module `yue2_studio/assist.py`.
+- **Two providers.** The `claude` CLI (Claude Code's login; `claude -p --json-schema …` in a
+  throwaway cwd, never `--bare`) or the Messages API with an API key (stdlib `urllib`, forced
+  `tool_use`, default model `claude-sonnet-5`). `Settings` gains `assist_provider`
+  (`auto|cli|api|off`; `auto` prefers the CLI), `assist_model` and a write-only
+  `anthropic_api_key` (absent = unchanged, `""` = cleared; stored in plain text in `data/app.db`,
+  never returned — responses carry `has_api_key` for the stored key). `GET /api/status` gains
+  `assist {provider, cli, api_key, model, reasons}`, where `api_key` also honours the
+  `ANTHROPIC_API_KEY` env fallback. The CLI runs with no MCP servers, skills or hooks and without
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` in its environment, so it bills the login.
+- **Ask Claude UI.** An "Ask Claude" box at the top of the Create, Cover and Hum forms: describe
+  the song, ⌘/Ctrl+Enter or *Ask Claude*, and the fields fill in (Create: title, style, lyrics,
+  mode, CFG; Cover/Hum: title, style, lyrics) with a result line naming what changed, Claude's
+  one-line tip and Undo/Redo. *Refine what's already in the form* (remembered) sends the current
+  fields so follow-ups edit instead of rewrite. The box shows a `CLI`/`API` tag, is disabled with
+  a hint when no provider can run, and is hidden entirely when the provider is `off`. Settings
+  gains a *Claude assist* section (provider, model, API key with Clear, Test — which saves first —
+  and a status line); status refreshes immediately after a save. `ui.js` gains `assistBox`.
+- Errors: 503 `assist_unavailable` (reasons joined with `; `) when no provider can run, 502
+  `assist_failed` with a readable message (not logged in, key rejected, rate limited, timeout,
+  unusable output). `scripts/mock_api.py` serves canned answers per page.
+
 ## 2026-09-18 — Projects, global player, header nav
 
 ### Added

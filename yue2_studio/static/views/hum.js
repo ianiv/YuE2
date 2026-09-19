@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
+import { assistBox, fill, fmt, h, loraPicker, presetPicker, seedField, store, toast, toastError, trackBanner, uploadPicker } from "../ui.js";
 
 const MELODY = [["continue", "Continue my melody", "The hum's notes open the score; YuE2 writes the rest of the song around them (the hummed phrase tends to come back as the hook)."],
   ["hum_only", "Hum is the whole melody", "The transcribed hum is the complete vocal line, like a cover; the song is as long as the hum."],
@@ -57,6 +57,16 @@ export async function humView({ el, query, app }) {
     influence: h("input", { id: "h-influence", type: "range", min: 0, max: 3, step: 0.05, value: saved.hum_influence, oninput: () => { influenceOut.textContent = Number(f.influence.value).toFixed(2); } }),
     offset: h("input", { id: "h-offset", type: "number", min: 0, max: 600, step: 0.1, value: saved.offset_s, style: "width:110px" }),
   };
+  // Claude assist: fills title/style/lyrics; applyFields returns the previous values so the box can undo.
+  function applyFields(fields) {
+    const prev = {};
+    for (const k of ["title", "style", "lyrics"]) if (k in fields) { prev[k] = f[k].value; f[k].value = fields[k] ?? ""; }
+    collect();
+    return prev;
+  }
+  const getContext = () => { const c = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value.trim() }; for (const k in c) if (!c[k]) delete c[k]; return c; };
+  const assist = assistBox({ page: "hum", app, getContext, apply: applyFields });
+  app.listeners.add(assist.onStatus);
   const influenceOut = h("b", { class: "num" }, Number(saved.hum_influence).toFixed(2));
   const melodyHint = h("p", { class: "hint" });
   const melodySeg = h("div", { class: "seg", role: "group", "aria-label": "Melody" }, MELODY.map(([v, l]) => h("button", { type: "button", dataset: { v }, onclick: () => setMelody(v) }, l)));
@@ -123,7 +133,7 @@ export async function humView({ el, query, app }) {
 
   const form = h("form", { class: "cols", onsubmit: onSubmit, oninput: collect },
     h("div", { class: "stack" }, unavailable,
-      h("div", { class: "grid2 stack-narrow" }, drop, rec.el), picker,
+      h("div", { class: "grid2 stack-narrow" }, drop, rec.el), picker, assist.el,
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Melody"), melodySeg, melodyHint),
       h("label", { class: "field" }, h("span", { class: "lbl" }, "Title"), f.title),
       h("label", { class: "field" }, h("span", { class: "lbl" }, h("span", {}, "Style"), h("span", {}, "required")), f.style),
@@ -139,7 +149,7 @@ export async function humView({ el, query, app }) {
   // Restore the last-used upload only if it still exists on the server — and only if the user has not
   // already dropped/recorded a fresh file while the list was loading.
   picker.refresh().then(() => { if (saved.upload_id && !upload && !dirty) { const u = picker.set(saved.upload_id); if (u) usePicked(u); else collect(); } });
-  return { unmount: () => { app.listeners.delete(listener); rec.stop(true); } };
+  return { unmount: () => { app.listeners.delete(listener); app.listeners.delete(assist.onStatus); rec.stop(true); } };
 }
 
 /** MediaRecorder-based recorder with a level meter, timer and playback preview. */

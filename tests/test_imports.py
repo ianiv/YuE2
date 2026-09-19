@@ -25,13 +25,17 @@ def probe(body: str) -> dict:
     return json.loads(out)
 
 
-HTTP_SIDE_MODULES = ("config", "jobs", "worker", "audio", "fake", "api", "main", "lora", "hum", "projects")
+HTTP_SIDE_MODULES = ("config", "jobs", "worker", "audio", "fake", "api", "main", "lora", "hum", "projects",
+                     "assist")
+
+
+PURE_MODULES = ("assist",)  # stdlib + pydantic only: never reach config, so TF32 is not pinned there
 
 
 @pytest.mark.parametrize("module", HTTP_SIDE_MODULES)
 def test_importing_http_side_modules_never_loads_mlx(module):
     result = probe(f"import yue2_studio.{module}")
-    assert result == {"loaded": [], "tf32": "0"}
+    assert result == {"loaded": [], "tf32": None if module in PURE_MODULES else "0"}
 
 
 def test_fake_app_never_imports_mlx(tmp_path):
