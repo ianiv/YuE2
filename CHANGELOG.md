@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — Claude assist
+## 2026-09-19 — Claude assist
 
 ### Added
 - **Ask Claude** (backend). `POST /api/assist {prompt, page, context?}` fills the Create / Cover /
@@ -30,6 +30,10 @@ All notable changes to YuE2 Studio. Dates are when the work was merged to `main`
   a hint when no provider can run, and is hidden entirely when the provider is `off`. Settings
   gains a *Claude assist* section (provider, model, API key with Clear, Test — which saves first —
   and a status line); status refreshes immediately after a save. `ui.js` gains `assistBox`.
+- Logging: the `yue2_studio.assist` logger reports each step at INFO (request page/prompt
+  length/context keys/resolved provider, "asking claude via cli|api …" right before the blocking
+  call, CLI cost and token usage, "claude answered via … in Ns: fields=[…]") and failures at
+  WARNING; the prompt text only at DEBUG, the API key never.
 - Errors: 503 `assist_unavailable` (reasons joined with `; `) when no provider can run, 502
   `assist_failed` with a readable message (not logged in, key rejected, rate limited, timeout,
   unusable output). `scripts/mock_api.py` serves canned answers per page.
