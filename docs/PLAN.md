@@ -52,7 +52,7 @@ YuE2/
 
 ## Dependencies (`pyproject.toml`)
 
-- `mlx-yue @ git+https://github.com/vanch007/mlx-Yue@ab0f058` with `[transcription]` extra — pinned commit; it pulls `mlx==0.32.2`, `mlx-lm`, `transformers`, `tiktoken`, `soundfile`, `psutil`, and the vendored `yue2` package.
+- `mlx-yue @ git+https://github.com/vanch007/mlx-Yue@9253ed1` with `[transcription]` extra — pinned commit; it pulls `mlx==0.32.2`, `mlx-lm`, `transformers`, `tiktoken`, `soundfile`, `psutil`, and the vendored `yue2` package.
 - `fastapi`, `uvicorn[standard]`, `sse-starlette`, `python-multipart` (uploads), `huggingface-hub`.
 - `requires-python = ">=3.12,<3.13"` (mlx-Yue constraint). `uv sync` fetches CPython 3.12.
 - Dev: `pytest`, `httpx`.
