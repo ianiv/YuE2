@@ -13,7 +13,7 @@ internet for score rendering) and the optional soundfont download for the score 
 | | |
 |---|---|
 | Hardware | Apple Silicon Mac. Peak use is ~11 GiB of unified memory; the default memory budget is 24 GiB, so **48 GB is recommended** (a 24–32 GB machine works with the budget lowered in Settings, see [Troubleshooting](#troubleshooting)). Timings below are from an M5 Max / 48 GB. |
-| macOS | **26.2 or newer** (mlx-Yue's guarded Metal runtime refuses older versions). |
+| macOS | **14.2 or newer** on M1–M4 chips; **26.2 or newer on M5** chips (mlx-Yue checks the chip via `mx.device_info()` and refuses older versions). Native arm64 Python only — not Intel or Rosetta. |
 | Python | 3.12 (fetched automatically by `uv`; the project is pinned to `>=3.12,<3.13`). |
 | Tools | [`uv`](https://docs.astral.sh/uv/) and `ffmpeg` on `PATH` (`brew install uv ffmpeg`). ffmpeg is needed for MP3 export, upload probing and covers. |
 | Disk | ~13 GB of weights: generator (ar-8bit 2.7 GB, ar-bf16 4.3 GB, nar-bf16 2.9 GB) + VAE 0.5 GB; covers add SheetSage2 0.2 GB + MERT-v2-FullSong 2.5 GB. |
@@ -21,7 +21,7 @@ internet for score rendering) and the optional soundfont download for the score 
 ## Setup
 
 ```bash
-uv sync                                          # creates .venv with Python 3.12 + mlx-Yue @ ab0f058
+uv sync                                          # creates .venv with Python 3.12 + mlx-Yue @ 9253ed1
 uv run python scripts/setup.py --with-cover      # downloads weights into models/ and prints a doctor report
 uv run yue2-studio --open                        # http://127.0.0.1:8765
 ```
@@ -313,7 +313,7 @@ plus `engine.py` are the only modules importing `mlx` —, `jobs.py` (validation
 (ffmpeg, uploads, zip), `assist.py` + `assist_prompt.md` (Ask Claude: CLI / API providers, schema,
 system prompt), `main.py` (app factory + CLI), `static/` (UI), `scripts/setup.py` (weights
 + doctor), `scripts/smoke.py` / `scripts/hum_smoke.py` (one generation through the engine with
-timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md` (contract).
+timings), `docs/PLAN.md` (design), `docs/API.md` (contract).
 
 ## Troubleshooting
 
@@ -337,10 +337,10 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
 - **`audio.mp3` answers 503.** ffmpeg is not on `PATH`; FLAC download and playback still work.
 - **Jobs left from a previous run.** Queued jobs are re-enqueued on start; a job that was `running`
   when the server died is marked `failed` ("server restarted…") — resubmit it.
-- **Why `compat/lyra-yue2`?** mlx-Yue commit `ab0f058` renamed its distribution from `lyra-yue2` to
-  `mlx-yue`, but `lyra.pipeline` / `lyra.commands` still call
-  `importlib.metadata.version("lyra-yue2")`. The `compat/lyra-yue2` directory is an empty,
-  metadata-only distribution with that name so the lookup succeeds without patching mlx-Yue. Keep it.
+- **"mlx-Yue requires macOS >=14.2" / "The MLX M5 runtime requires macOS >=26.2" / "Native Apple
+  Silicon Python on macOS is required".** mlx-Yue's runtime gate (`lyra.runtime`): update macOS, or
+  make sure `uv` created an arm64 (not Rosetta) Python. `uv run python scripts/setup.py
+  --skip-download` prints the full `runtime` report.
 - **Two servers on one home.** They share `data/app.db` and steal each other's jobs; give each its
   own `YUE2_STUDIO_HOME` (with `models/` symlinked to the shared weights).
 
@@ -358,7 +358,7 @@ timings), `compat/lyra-yue2/` (see below), `docs/PLAN.md` (design), `docs/API.md
   [MERT-v2-FullSong](https://huggingface.co/m-a-p/MERT-v2-FullSong)) carry their own licences on
   their model cards.
 - [mlx-Yue](https://github.com/vanch007/mlx-Yue) (the engine this studio wraps, pinned at
-  `ab0f058`) is licensed under the
+  `9253ed1`) is licensed under the
   [Apache License 2.0](https://github.com/vanch007/mlx-Yue/blob/main/LICENSE). The example
   requests in `examples/` are copied from it.
 - [abcjs](https://github.com/paulrosen/abcjs) (MIT) renders and plays the scores in the browser. It

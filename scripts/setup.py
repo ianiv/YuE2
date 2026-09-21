@@ -94,20 +94,23 @@ def doctor(verify_hashes: bool, require_ffmpeg: bool = False) -> dict:
     """Same checks as ``lyra.commands.doctor`` (verify_conversion / model_identity) plus studio extras."""
     import importlib.metadata
 
-    import mlx.core as mx
     import psutil
     from lyra.conversion import verify_conversion
+    from lyra.runtime import runtime_status
     from yue2.storage import model_identity
 
-    mac = platform.mac_ver()[0]
-    mac_tuple = tuple(int(x) for x in mac.split(".")[:2]) if mac else (0, 0)
+    # mlx-Yue's own gate: Apple Silicon + macOS >= 14.2, or >= 26.2 on M5 chips.
+    runtime = runtime_status()
+    mac = runtime["macos"]
     checks = {
-        "macos": platform.system() == "Darwin",
-        "macos_version": mac_tuple >= (26, 2),
-        "metal": mx.metal.is_available(),
+        "macos": runtime["system"] == "Darwin",
+        "metal": runtime["metal"],
+        "supported_runtime": runtime["supported"],
         "tf32_disabled": config.os.environ.get("MLX_ENABLE_TF32") == "0",
     }
     warnings = []
+    if runtime["error"]:
+        warnings.append(runtime["error"])
     if require_ffmpeg:
         checks["ffmpeg"] = config.FFMPEG is not None
     elif config.FFMPEG is None:
@@ -115,6 +118,7 @@ def doctor(verify_hashes: bool, require_ffmpeg: bool = False) -> dict:
     report: dict = {
         "platform": platform.platform(),
         "macos": mac,
+        "runtime": runtime,
         "memory_gib": round(psutil.virtual_memory().total / 2**30, 1),
         "versions": {n: importlib.metadata.version(n) for n in ("mlx-yue", "mlx", "mlx-lm")},
         "home": str(config.HOME),

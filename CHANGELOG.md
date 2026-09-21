@@ -2,6 +2,22 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — mlx-Yue 9253ed1
+
+### Changed
+- **mlx-Yue pinned at `9253ed1`** (was `ab0f058`). Upstream's runtime gate now accepts
+  **macOS ≥ 14.2 on M1–M4** and only requires **≥ 26.2 on M5** (detected via `mx.device_info()`),
+  and rejects Intel / Rosetta Python outright; the README requirements table and
+  the `scripts/setup.py` doctor report (which now reports mlx-Yue's `runtime` status instead of its own
+  `macos_version >= 26.2` check) follow suit. Upstream also bumps `transformers` 5.0.0 → 5.10.4
+  and `pretty-midi` → 0.2.11.post0 for the transcription (cover / hum) path.
+- **PyPI refresh**: `uvicorn` 0.53, `watchfiles` 1.3, `huggingface-hub` 1.32, `filelock` 4.0 and
+  other transitive minors.
+
+### Removed
+- **`compat/lyra-yue2/`**. Upstream fixed its `importlib.metadata.version("lyra-yue2")` lookups to
+  read `mlx-yue`, so the metadata-only alias distribution is no longer needed.
+
 ## 2026-09-19 — Claude assist
 
 ### Added
