@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — mlx-Yue 9253ed1
+## 2026-09-21 — mlx-Yue 9253ed1
 
 ### Changed
 - **mlx-Yue pinned at `9253ed1`** (was `ab0f058`). Upstream's runtime gate now accepts
