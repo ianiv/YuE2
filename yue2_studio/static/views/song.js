@@ -8,6 +8,8 @@ export async function songView({ el, param, app }) {
   catch (e) { fill(el, h("div", { class: "empty" }, e.status === 404 ? "This song does not exist (it may have been deleted)." : e.message, " ", h("a", { href: "#/library" }, "Back to library"))); return {}; }
   if (job.status === "queued" || job.status === "running") { fill(el, h("div", { class: "empty" }, "This job is still ", job.status, ". ", h("a", { href: "#/queue" }, "Watch it in the queue"))); return {}; }
   const p = job.params, t = job.timing || {};
+  const continued = job.kind === "cover" && p.mode === "continue"; // cover whose clip opened the song
+  const clipLabel = p.clip_start_s != null ? `${fmt.dur(p.clip_start_s)} – ${p.clip_end_s != null ? fmt.dur(p.clip_end_s) : "end"}` : "whole recording";
   const [abc, transcription, humAbc] = await Promise.all([
     job.artifacts.score ? api.text(songUrl(job.id, "score.abc")).catch(() => "") : "",
     job.kind === "cover" && job.artifacts.transcription ? api.text(songUrl(job.id, "transcription/score.abc")).catch(() => "") : "",
@@ -28,7 +30,7 @@ export async function songView({ el, param, app }) {
   const loras = loraPicker(job.loras || [], app.status && app.status.loras ? app.status.loras.adapters : []);
   const regenBtn = h("button", { class: "primary", onclick: regenerate }, "Regenerate from this score");
   const countIn = h("input", { id: "s-count", type: "number", min: 2, max: 16, value: 3, style: "width:70px" });
-  const varBtn = h("button", { onclick: variations, disabled: job.kind === "cover" && !transcription, title: job.kind === "cover" ? "Variations of a cover reuse its transcription" : "" }, "More variations");
+  const varBtn = h("button", { onclick: variations, disabled: job.kind === "cover" && !(continued ? abc : transcription), title: job.kind === "cover" ? (continued ? "Variations keep the continued score" : "Variations of a cover reuse its transcription") : "" }, "More variations");
 
   async function regenerate() {
     const text = abcArea.value.trim();
@@ -47,10 +49,12 @@ export async function songView({ el, param, app }) {
     varBtn.disabled = true;
     try {
       // Covers: seed the variations from the transcription so the melody is kept (cot melody, as the cover flow does).
-      const base = job.kind === "cover"
-        ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: null, abc: transcription, title: p.title || null }
+      const base = continued
+        ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc, title: p.title || null } // like hum: keep the continued score
+        : job.kind === "cover"
+        ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: transcription, title: p.title || null }
         : job.kind === "hum"
-          ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: null, abc: abc || null, title: p.title || null } // variations keep the continued score
+          ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: abc || null, title: p.title || null } // variations keep the continued score
           : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
       const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: loras.value(), track_id: trackId(), params: { count, base, random_seeds: false, label: null } });
       rememberGroup(r.group, r.jobs);
@@ -133,7 +137,7 @@ export async function songView({ el, param, app }) {
         h("section", { class: "panel stack" }, h("h3", {}, "Request"),
           h("p", {}, h("span", { class: "muted small", style: "text-transform:uppercase;letter-spacing:.05em" }, "Style "), p.style || "—"),
           h("pre", { class: "block lyrics-block", "aria-label": "Lyrics" }, p.lyrics || "—")),
-        h("section", { class: "stack" }, h("h3", {}, job.kind === "hum" ? (p.melody === "hum_only" ? "Score (from your hum)" : p.melody === "continue" ? "Continued score" : "Score") : "Score"),
+        h("section", { class: "stack" }, h("h3", {}, job.kind === "hum" ? (p.melody === "hum_only" ? "Score (from your hum)" : p.melody === "continue" ? "Continued score" : "Score") : continued ? "Continued score" : "Score"),
           abc ? [scoreEl, h("div", { class: "row" }, midi, h("span", { class: "hint" }, "Edit the ABC below; the score re-renders as you type.")), abcArea]
             : h("p", { class: "muted" }, "No score for this song (mode off or planning did not finish)."),
           h("div", { class: "panel stack" },
@@ -142,13 +146,14 @@ export async function songView({ el, param, app }) {
             h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
             h("div", { class: "row" }, regenBtn, h("span", { class: "spacer" }), h("label", { class: "row", style: "gap:6px" }, countIn, varBtn)),
             h("p", { class: "hint" }, "Regenerate keeps the lyrics and mode; variations start from a fresh random seed. ", h("a", { href: `#/create?from=${job.id}` }, "Open in Create")))),
-        transcription ? h("section", { class: "stack" }, h("h3", {}, "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null,
+        transcription ? h("section", { class: "stack" }, h("h3", {}, continued ? "Source clip (the opening the planner continued)" : "Transcription (from the uploaded audio)"), (() => { const s = h("div", { class: "score" }); renderScore(s, transcription); return s; })(), h("details", {}, h("summary", {}, "transcription/score.abc"), h("pre", { class: "block mono" }, transcription))) : null,
         humAbc ? h("section", { class: "stack" }, h("h3", {}, p.melody === "continue" ? "Your hum (the open score the planner continued)" : "Your hum (transcribed)"), (() => { const s = h("div", { class: "score" }); renderScore(s, humAbc); return s; })(), h("details", {}, h("summary", {}, "hum/hum.abc"), h("pre", { class: "block mono" }, humAbc))) : null),
       h("div", { class: "stack" },
         projectPanel,
         h("div", { class: "panel stack" }, h("h3", {}, "Details"),
           h("dl", { class: "kv" },
             h("dt", {}, job.kind === "cover" ? "Task" : job.kind === "hum" ? "Melody" : "Mode"), h("dd", {}, job.kind === "hum" ? (p.melody || "continue").replace("_", " ") : (p.task || p.cot || "—")),
+            job.kind === "cover" ? [h("dt", {}, "Melody"), h("dd", {}, continued ? "continue from the clip" : "cover the whole melody"), h("dt", {}, "Source"), h("dd", {}, clipLabel)] : null,
             job.kind === "hum" ? [h("dt", {}, "Hum adapter"), h("dd", {}, p.adapter ? `${p.adapter} · influence ${p.hum_influence} · from ${p.offset_s}s` : "none (score only)")] : null,
             h("dt", {}, "Preset"), h("dd", {}, `${job.preset} · ${job.precision} · ${job.ode_steps} steps`),
             job.loras && job.loras.length ? [h("dt", {}, "LoRA"), h("dd", {}, loraLabel(job.loras))] : null,

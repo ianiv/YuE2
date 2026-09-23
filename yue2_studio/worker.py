@@ -43,7 +43,8 @@ class Engine(Protocol):
 
     def cover_song(self, audio_path: Path, out_dir: Path, *, task: str, request: dict,
                    options: config.EngineOptions, on_event: Callable[[dict], None] | None = None,
-                   cancelled: Callable[[], bool] | None = None) -> dict: ...
+                   cancelled: Callable[[], bool] | None = None, mode: str = "cover",
+                   clip_start_s: float = 0.0, clip_end_s: float | None = None) -> dict: ...
 
     def hum_song(self, audio_path: Path, out_dir: Path, *, request: dict, hum: Any,
                  options: config.EngineOptions, on_event: Callable[[dict], None] | None = None,
@@ -63,6 +64,7 @@ EVENT_FIELDS = ("type", "job_id", "ts", "stage", "label", "completed", "total", 
 
 _STAGE_KEYS = {
     "verifying model files": "load",
+    "cutting clip": "transcribe",
     "transcribing audio": "transcribe",
     "analysing hum": "hum",
     "encoding hum": "hum",
@@ -446,9 +448,12 @@ class Worker:
             request = engine_request(job)
             if job.kind == "cover":
                 audio_path = self._upload_path(job.params["upload_id"])
-                summary = engine.cover_song(audio_path, song_dir, task=job.params.get("task", "melody-full"),
+                p = job.params
+                summary = engine.cover_song(audio_path, song_dir, task=p.get("task", "melody-full"),
                                             request=request, options=options, on_event=on_event,
-                                            cancelled=cancel.is_set)
+                                            cancelled=cancel.is_set, mode=p.get("mode", "cover"),
+                                            clip_start_s=float(p.get("clip_start_s") or 0.0),
+                                            clip_end_s=p.get("clip_end_s"))
             elif job.kind == "hum":
                 audio_path = self._upload_path(job.params["upload_id"])
                 summary = engine.hum_song(audio_path, song_dir, request=request, hum=hum_options(job),

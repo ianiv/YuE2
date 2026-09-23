@@ -28,6 +28,10 @@ DEFAULT_REQUIRE_AC = False
 # reproduce under the other.
 DEFAULT_FAST_NUMERICS = True
 
+# Cover source clips (seconds): the shortest clip worth transcribing and the latest bound accepted.
+MIN_CLIP_S = 1.0
+MAX_CLIP_S = 3600.0
+
 # Hugging Face repositories (revisions for the transcription models are the ones pinned by
 # lyra.transcription.model; scripts/setup.py asserts they still agree).
 MODEL_REPO = "vanch007/mlx-Yue2-3B"

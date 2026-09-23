@@ -118,6 +118,42 @@ def decode_pcm(path: Path, *, sample_rate: int, channels: int, cancelled=None, t
     return data if channels == 1 else data.reshape(-1, channels)
 
 
+def extract_clip(source: Path, destination: Path, *, start_s: float = 0.0, end_s: float | None = None,
+                 timeout: float = 600) -> float:
+    """Cut ``[start_s, end_s)`` of ``source`` into a FLAC at ``destination``; returns the clip's seconds.
+
+    Seeking before ``-i`` is sample-accurate because the audio is re-encoded. ``end_s`` ``None`` keeps
+    everything after ``start_s``. A clip that starts at or after the end of the recording is an error.
+    """
+    import soundfile as sf
+
+    ffmpeg = ffmpeg_path()
+    if ffmpeg is None:
+        raise FfmpegMissing("ffmpeg is not installed")
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-ss", f"{start_s:.3f}", "-i", str(source), "-vn"]
+    if end_s is not None:
+        cmd += ["-t", f"{end_s - start_s:.3f}"]
+    cmd += ["-c:a", "flac", "-f", "flac", str(destination)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
+    except subprocess.CalledProcessError as error:
+        destination.unlink(missing_ok=True)
+        raise decode_error(error, source) from None
+    with sf.SoundFile(str(destination)) as clip:
+        frames, rate = clip.frames, clip.samplerate
+        if not 0 < frames < 2**62:  # an empty FLAC reports "unknown length" and fails to read
+            try:
+                frames = sum(len(block) for block in clip.blocks(1 << 16))
+            except sf.LibsndfileError:
+                frames = 0
+    if frames == 0:
+        destination.unlink(missing_ok=True)
+        raise ValueError(f"The clip starts at {start_s:g}s, after the end of {Path(source).name}")
+    return frames / rate
+
+
 def decode_error(error: subprocess.CalledProcessError, path: Path) -> ValueError:
     """Turn ffmpeg's ``CalledProcessError`` (exit status only) into a readable ``ValueError``."""
     stderr = error.stderr or b""

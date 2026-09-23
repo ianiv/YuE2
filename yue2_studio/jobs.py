@@ -82,6 +82,12 @@ def _non_empty(value: str, name: str) -> str:
     return value
 
 
+def _check_cfg(value: float | None) -> float | None:
+    if value is not None and not 0 <= value <= 20:
+        raise ValueError("cfg_scale must be in [0, 20]")
+    return value
+
+
 def _check_seed(value: int | None) -> int | None:
     if value is None:
         return None
@@ -117,9 +123,7 @@ class CreateParams(_Params):
     @field_validator("cfg_scale")
     @classmethod
     def _cfg(cls, v):
-        if v is not None and not 0 <= v <= 20:
-            raise ValueError("cfg_scale must be in [0, 20]")
-        return v
+        return _check_cfg(v)
 
     @field_validator("abc")
     @classmethod
@@ -151,12 +155,34 @@ class RegenerateParams(_Params):
 
 
 class CoverParams(_Params):
+    """Cover: transcribe an upload (optionally a clip of it) and use the score.
+
+    ``mode="cover"`` follows the whole transcribed score; ``mode="continue"`` opens the song with it and
+    lets the planner write the rest (the hum-to-song continuation; needs a melody task).
+    """
+
     upload_id: str
     task: Literal["melody-full", "melody-vocal", "full"] = "melody-full"
+    mode: Literal["cover", "continue"] = "cover"
+    clip_start_s: float = Field(default=0.0, ge=0.0, le=config.MAX_CLIP_S, allow_inf_nan=False)
+    clip_end_s: float | None = Field(default=None, gt=0.0, le=config.MAX_CLIP_S, allow_inf_nan=False)
     style: str
     lyrics: str
     seed: int | None = None
     title: str | None = None
+    cfg_scale: float | None = Field(default=None, allow_inf_nan=False)
+
+    @field_validator("cfg_scale")
+    @classmethod
+    def _cfg(cls, v):
+        return _check_cfg(v)
+
+    def check(self) -> None:
+        if self.mode == "continue" and self.task == "full":
+            raise ValidationFailure("mode=continue needs a melody task (melody-full or melody-vocal)")
+        if self.clip_end_s is not None and self.clip_end_s - self.clip_start_s < config.MIN_CLIP_S:
+            raise ValidationFailure(f"the clip must be at least {config.MIN_CLIP_S:g}s long "
+                                    "(clip_end_s after clip_start_s)")
 
     @field_validator("style")
     @classmethod
@@ -186,6 +212,12 @@ class HumParams(_Params):
     adapter: str | None = None
     hum_influence: float = 1.0
     offset_s: float = 0.0
+    cfg_scale: float | None = Field(default=None, allow_inf_nan=False)
+
+    @field_validator("cfg_scale")
+    @classmethod
+    def _cfg(cls, v):
+        return _check_cfg(v)
 
     @field_validator("style")
     @classmethod
@@ -1355,6 +1387,7 @@ def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
 
     if req.kind == "cover":
         p = parse(CoverParams, req.params)
+        p.check()
         upload = upload_lookup(p.upload_id) if upload_lookup is not None else None
         if upload is None:
             raise NotFound(f"upload {p.upload_id!r} not found")
@@ -1363,8 +1396,10 @@ def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
         title = p.title if p.title is not None and p.title.strip() else None
         if title is None:
             title = Path(upload.get("filename", "")).stem or None
-        params = {"upload_id": p.upload_id, "task": p.task, "style": p.style, "lyrics": p.lyrics,
-                  "seed": seed, "title": title}
+        params = {"upload_id": p.upload_id, "task": p.task, "mode": p.mode, "style": p.style,
+                  "lyrics": p.lyrics, "seed": seed, "title": title, "cfg_scale": p.cfg_scale}
+        if p.clip_start_s or p.clip_end_s is not None:
+            params.update(clip_start_s=float(p.clip_start_s), clip_end_s=p.clip_end_s)
         job = store.create(kind="cover", params=params, options=options, seed=seed)
         return Submission([job])
 
@@ -1383,7 +1418,8 @@ def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
             title = Path(upload.get("filename", "")).stem or None
         params = {"upload_id": p.upload_id, "style": p.style, "lyrics": p.lyrics, "seed": seed,
                   "title": title, "melody": p.melody, "adapter": p.adapter,
-                  "hum_influence": float(p.hum_influence), "offset_s": float(p.offset_s)}
+                  "hum_influence": float(p.hum_influence), "offset_s": float(p.offset_s),
+                  "cfg_scale": p.cfg_scale}
         job = store.create(kind="hum", params=params, options=options, seed=seed)
         return Submission([job])
 
@@ -1403,6 +1439,8 @@ def engine_request(job: Job) -> dict:
     p = job.params
     request = {"style": p["style"], "lyrics": p["lyrics"], "cot": p.get("cot", "full"), "seed": job.seed,
                "id": job.id}
+    if p.get("cfg_scale") is not None:
+        request["cfg_scale"] = float(p["cfg_scale"])
     if job.kind == "cover":
         request["cot"] = "full" if p.get("task") == "full" else "melody"
         return request
@@ -1411,6 +1449,4 @@ def engine_request(job: Job) -> dict:
         return request
     if p.get("abc"):
         request["abc"] = p["abc"]
-    if p.get("cfg_scale") is not None:
-        request["cfg_scale"] = float(p["cfg_scale"])
     return request

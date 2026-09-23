@@ -2,6 +2,23 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — Continue a recording from the Cover page
+
+### Added
+- **Continue from a clip.** Cover has a new *Melody* choice: *Cover the whole melody* (as before) or
+  *Continue from the clip*, which treats the recording like a hum — the clip's vocal melody is
+  transcribed, its trailing rests are trimmed and the planner continues that open score, so the song opens
+  with the clip's melody and YuE2 writes the rest. Only notes are transcribed, never words: the lyrics
+  come from the form and should cover the whole song (the first lines are sung over the clip's melody).
+  Needs a melody task; no hum adapter (its pitch tracker needs a single voice, not a mix).
+- **Clip range for covers.** *Clip* from / to (`m:ss` or seconds) cuts the upload before transcription in
+  either mode (`source/clip.flac`); switching to *Continue* with no end set suggests a 30 s clip.
+  API: `CoverParams.mode`, `clip_start_s`, `clip_end_s`; the song page shows the melody mode and source
+  range, and variations of a continued cover keep the continued score.
+- **CFG scale on Cover and Hum.** Both forms get the *CFG scale* field Create has (empty = engine default;
+  needed e.g. with the instrumental AR LoRA). `CoverParams.cfg_scale` / `HumParams.cfg_scale`; the song
+  page's regenerate and variations keep it.
+
 ## 2026-09-22 — Full-width track names on desktop
 
 ### Fixed

@@ -103,6 +103,18 @@ song is generated from the transcription:
 | `melody-vocal` | vocal melody only | `cot=melody` |
 | `full` | full score | `cot=full` |
 
+Cover and Hum take a **CFG scale** too (empty = engine default), as on Create — useful with the
+instrumental AR LoRA. **Clip** (optional, `m:ss` or seconds) cuts the recording before transcription, so only that part is
+used. **Melody** picks what happens to the transcription:
+
+- *Cover the whole melody* (default) — the transcription is the complete score, as above.
+- *Continue from the clip* — the recording works like a hum: the clip's melody is transcribed, its trailing
+  rests are trimmed, and the planner **continues** that open score, so the song opens with the clip's melody
+  and YuE2 writes the rest. It needs a melody task (*Full transcription* is disabled) and suggests a 30 s clip
+  (15–30 s works best). Only the notes are transcribed, never the words: write lyrics for the **whole** song —
+  the first lines are sung over the clip's melody, so give them roughly the original's syllable count. There
+  is no pitch-contour adapter here (a hum adapter's pitch tracker needs a single voice, not a full mix).
+
 Cover is disabled (and the API answers 409) until the transcription models and ffmpeg are present;
 `#/settings` and `GET /api/status` say what is missing.
 

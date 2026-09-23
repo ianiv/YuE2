@@ -87,10 +87,14 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 |-------|------|----------------|
 | `upload_id` | str | required; from `POST /api/upload`; 404 if unknown |
 | `task` | enum(melody-full\|melody-vocal\|full) | `melody-full` |
+| `mode` | enum(cover\|continue) | `cover`: the transcription is the whole score; `continue`: its trailing rests are trimmed and the planner continues the open score (hum-style continuation, no adapter); `continue` needs a melody task (400 with `full`) |
+| `clip_start_s` | float? | `0`; 0–3600; seconds into the upload where transcription starts. Stored only when a clip is set |
+| `clip_end_s` | float? | `null` = the end of the upload; ≤ 3600 and at least 1 s after `clip_start_s` (400 otherwise). A start past the end of the recording fails the job |
 | `style` | str | required |
-| `lyrics` | str | required |
+| `lyrics` | str | required; with `mode=continue`, lyrics for the whole song (the first lines are sung over the clip's melody) |
 | `seed` | int? | random |
 | `title` | str? | defaults to upload filename stem |
+| `cfg_scale` | float? | `null` = engine default; 0..20; as on Create (e.g. 1.5–3 with the instrumental AR LoRA) |
 
 ### HumParams
 
@@ -105,6 +109,7 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 | `adapter` | str? | a `kind="hum"` adapter from `Status.hum.adapters` (400 if unknown, unusable, or a plain LoRA); without one only the score continuation runs |
 | `hum_influence` | float | 1.0; 0..3; classifier-free guidance on the decoder's hum channel (1 = as trained, 0 = no hum, ≠1 costs ~2× synthesis) |
 | `offset_s` | float | 0; 0..600; where the hum's carrier starts inside the song |
+| `cfg_scale` | float? | `null` = engine default; 0..20; classifier-free guidance of the song's AR branches, as on Create (separate from `hum_influence`) |
 
 Hum jobs always run with `cot=melody`; the transcription is `melody-vocal`. `Job.artifacts.hum` is true once
 `hum/hum.abc` (the open score) exists. Hum adapters are rejected in the `loras` stack (400) and plain LoRAs
@@ -556,11 +561,12 @@ Cover:
 ```
 #/cover  ──POST /api/upload (multipart file)──▶ 201 {upload_id, seconds}
          or pick a recent upload (GET /api/uploads) and skip the upload
-      │ user picks task/style/lyrics/seed/preset
+      │ user picks clip/melody/task/style/lyrics/seed/preset
       ▼
-POST /api/jobs {kind:"cover", params:{upload_id, task, style, lyrics}} ──▶ 201 {job}
+POST /api/jobs {kind:"cover", params:{upload_id, task, mode?, clip_start_s?, clip_end_s?, style, lyrics}} ──▶ 201 {job}
       ▼
-events: stage=load → stage=transcribe → stage=plan (abc text streams) → semantic → synthesize → decode → save → done
+events: stage=load → stage=transcribe ("Cutting clip" + "Transcribing audio") → stage=plan (abc text streams;
+        with mode=continue it starts with the clip's open score) → semantic → synthesize → decode → save → done
       ▼
 #/song/{id}: player + GET /api/songs/{id}/transcription/score.abc rendered beside the result score
 ```
@@ -630,11 +636,14 @@ class Engine(Protocol):
         latched error would otherwise poison every later job); the next ensure() rebuilds it."""
 
     def cover_song(self, audio_path: Path, out_dir: Path, *, task: str, request: dict,
-                   options: EngineOptions, on_event=None, cancelled=None) -> dict:
+                   options: EngineOptions, on_event=None, cancelled=None, mode: str = "cover",
+                   clip_start_s: float = 0.0, clip_end_s: float | None = None) -> dict:
         """task in {melody-full, melody-vocal, full}; request as above without abc (cot is forced to
-        melody/full to match task). Transcribes first (stage "Transcribing audio", then releases and
-        lazily reloads the song models), then runs create_song with the transcribed ABC. Same return
-        plus "transcription" (below) and timing.transcription_seconds. State stays "busy" throughout."""
+        melody/full to match task). With a clip, cuts it first (stage "Cutting clip", source/clip.flac).
+        Transcribes (stage "Transcribing audio", then releases and lazily reloads the song models), then
+        runs create_song with the transcribed ABC (mode="cover") or continues the trimmed open score
+        (mode="continue", source/open.abc; needs a melody task). Same return plus "transcription" and
+        "cover" (below) and timing.transcription_seconds. State stays "busy" throughout."""
 
     def memory_footprint(self) -> dict:   # bytes: rss_bytes, system_available_bytes, mlx_active_bytes,
                                           # mlx_cache_bytes, mlx_peak_bytes (worker converts to GiB)
@@ -660,7 +669,8 @@ hence in `result.json` and the request identity.
 | `summary.json` | at the end | the dict returned by `create_song` / `cover_song` |
 | `transcription/` | covers and hums, before the song stages | `score.abc`, `result.json`, `melody.mid`, `*.lab`, `events.json`, … |
 | `hum/`, `hum.json` | hums only | `hum.abc` (open score fed to the planner), `carrier.flac` / `carrier_latents.npy` / `prosody.json` (adapter only); `hum.json` receipt (melody, adapter, influence, offset, hashes) |
-| `request.json`, `cover.json` | covers only | resolved request incl. transcribed `abc`; cover receipt |
+| `request.json`, `cover.json` | covers only | resolved request (incl. transcribed `abc` for `mode=cover`; none for `continue`); cover receipt (task, mode, clip) |
+| `source/` | covers with a clip or `mode=continue` | `clip.flac` (the cut the transcription read), `open.abc` (the open score the planner continued) |
 | `job.json` | by the worker, at job start | the stored job (id, kind, params, preset/precision/ode_steps, loras, seed, ids, created_at) |
 | `audio.mp3` (in `song/`), `artifacts.zip` | lazily by the HTTP routes | cached MP3 transcode; zip of the song dir (excluded from itself) |
 
@@ -685,7 +695,8 @@ The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` �
 ```
 
 `timing.abc` is `{"seconds": 0.0, "output_tokens": 0, "external_prefix_tokens": N}` when the ABC was supplied;
-`transcription*` keys exist only for covers. `truncated` is always `{"abc": bool, "semantic": bool}`.
+`transcription*` keys exist only for covers (and hums); covers also carry `"cover": {"mode": "cover"|"continue",
+"clip": {"start_s", "end_s", "seconds", "path"} | null, "open_abc": "source/open.abc" | null}`. `truncated` is always `{"abc": bool, "semantic": bool}`.
 The worker derives the HTTP `Job.timing` (`{"plan": 15.8, "semantic": 35.9, "synthesize": 27.2, "decode": 3.4,
 "transcribe": 4.1, "e2e": 82.4, "abc_tps": 131.1, "semantic_tps": 128.8, "audio_seconds": 184.7}`) and `Job.truncated`
 (`{"phase": "semantic", "reason": "generation limit reached"}` for the first true flag, else null) from it.

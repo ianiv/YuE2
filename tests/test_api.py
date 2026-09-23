@@ -748,7 +748,8 @@ async def test_upload_validation_and_cover(client, api, app):
                                                          "lyrics": "la"}})
     job = body["job"]
     assert job["kind"] == "cover" and job["title"] == "demo song" and job["params"]["task"] == "melody-full"
-    assert set(job["params"]) == {"upload_id", "task", "style", "lyrics", "seed", "title"}
+    assert set(job["params"]) == {"upload_id", "task", "mode", "style", "lyrics", "seed", "title",
+                                  "cfg_scale"}
     progress, done = await api.events(job["id"])
     assert done["status"] == "done" and done["artifacts"]["transcription"] is True
     assert done["timing"]["transcribe"] is not None and done["timing"]["transcribe"] >= 0
@@ -1044,7 +1045,7 @@ async def test_hum_submit_streams_and_serves_artifacts(client, api, app, home):
                                                         "hum_influence": 1.5, "offset_s": 0.5}}))["job"]
     assert job["kind"] == "hum" and job["title"] == "hum-2026"
     assert set(job["params"]) == {"upload_id", "style", "lyrics", "seed", "title", "melody", "adapter",
-                                  "hum_influence", "offset_s"}
+                                  "hum_influence", "offset_s", "cfg_scale"}
     assert job["params"]["melody"] == "continue" and job["params"]["hum_influence"] == 1.5
     progress, done = await api.events(job["id"])
     assert done["status"] == "done" and done["artifacts"]["hum"] is True
