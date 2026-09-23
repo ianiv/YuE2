@@ -84,6 +84,14 @@ export const player = {
     queue.splice(i, 1); if (i < idx) idx--;
     persist(); paint();
   },
+  /** A renamed song: update its queue entries (bar, remembered state, media session) and play buttons. */
+  retitle(id, title) {
+    for (const b of document.querySelectorAll("[data-play-id]")) if (b.dataset.playId === id) b.dataset.playTitle = title;
+    const hits = queue.filter((t) => t.id === id); if (!hits.length) { paint(); return; }
+    for (const t of hits) t.title = title;
+    const t = current(); if (t && t.id === id) announce(t);
+    persist(); paint();
+  },
   current,
   isPlaying: (id) => { const t = current(); return !!t && t.id === id && !audio.paused; },
   /** Subscribe to state changes ({track, idx, queue, playing}); called once right away. Returns off(). */

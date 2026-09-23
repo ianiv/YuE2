@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, jobTitle, loraLabel, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
 import { playButton, player } from "../player.js";
 
 export async function songView({ el, param, app }) {
@@ -107,12 +107,20 @@ export async function songView({ el, param, app }) {
     h("thead", {}, h("tr", {}, h("th", {}, "Stage"), h("th", { class: "num" }, "Seconds"), h("th", { class: "num" }, "Share"))),
     h("tbody", {}, stageKeys.map((k) => h("tr", { style: k === "e2e" ? "font-weight:600" : "" }, h("td", {}, STAGE_NAMES[k] || k), h("td", { class: "num" }, Number(t[k]).toFixed(1)), h("td", { class: "num" }, k === "e2e" || !t.e2e ? "" : `${Math.round(100 * t[k] / t.e2e)}%`)))))) : h("p", { class: "muted small" }, "No timing recorded.");
 
+  // Click-to-rename heading; clearing the title falls back to the style excerpt (shown as the placeholder).
+  const untitled = jobTitle({ ...job, title: null, params: { ...p, title: null } });
+  const titleEl = inlineEdit(job.title || "", async (title) => {
+    const { job: renamed } = await api.patchJob(job.id, { title: title || null });
+    Object.assign(job, renamed); // in place: the play button and take controls hold this object
+    player.retitle(job.id, jobTitle(job));
+  }, { tag: "h1", placeholder: untitled, allowEmpty: true, title: "Click to rename" });
+
   const planBox = h("pre", { class: "block mono" }, "Loading…");
   const planDetails = h("details", { ontoggle: async () => { if (planDetails.open && !planDetails._loaded) { planDetails._loaded = true; try { planBox.textContent = JSON.stringify(JSON.parse(await api.text(songUrl(job.id, "plan.json"))), null, 2); } catch (e) { planBox.textContent = "plan.json not available: " + e.message; } } } },
     h("summary", {}, "plan.json"), planBox);
 
   fill(el,
-    h("div", { class: "view-head" }, h("h1", {}, jobTitle(job)), h("span", { class: "tag" }, job.kind), h("span", { class: `tag ${job.status === "done" ? "ok" : "err"}` }, job.status),
+    h("div", { class: "view-head" }, titleEl, h("span", { class: "tag" }, job.kind), h("span", { class: `tag ${job.status === "done" ? "ok" : "err"}` }, job.status),
       job.group_id ? h("a", { class: "tag accent", href: `#/library?group=${job.group_id}` }, "group") : null, job.parent_id ? h("a", { class: "tag", href: `#/song/${job.parent_id}` }, "parent") : null, headTag,
       h("span", { class: "spacer" }), h("a", { class: "btn ghost sm", href: "#/library" }, "← Library")),
     job.status === "failed" ? h("div", { class: "errbox mono", style: "margin-bottom:14px" }, job.error || "failed") : null,

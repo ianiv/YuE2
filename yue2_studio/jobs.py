@@ -350,6 +350,25 @@ def _no_bool(value):
     return value
 
 
+class JobPatch(_Params):
+    """``PATCH /api/jobs/{id}``: only the title is editable. Blank or null clears it (the UI then
+    falls back to the style excerpt); whitespace runs collapse like project and track names."""
+
+    title: str | None = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("title must be a string or null")
+        v = " ".join(v.split())
+        if len(v) > 200:
+            raise ValueError("title must be at most 200 characters")
+        return v or None
+
+
 class ProjectBody(_Params):
     name: str
     description: str = Field(default="", max_length=2000)
@@ -864,6 +883,17 @@ class JobStore:
             if cursor.rowcount == 0 and where_status is None:
                 raise NotFound(f"job {job_id!r} not found")
             return cursor.rowcount > 0
+
+    def set_title(self, job_id: str, title: str | None) -> Job:
+        """Rename a job by rewriting ``params.title``; ``None`` clears it."""
+        with self._tx() as conn:
+            row = conn.execute("SELECT params_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"job {job_id!r} not found")
+            params = _loads(row["params_json"]) or {}
+            params["title"] = title
+            self._set(job_id, params=params)
+        return self.get(job_id)
 
     def update_status(self, job_id: str, status: str, *, expected: str | None = None, **fields) -> bool:
         """Set ``status`` (and any extra columns). With ``expected`` the update is conditional and
