@@ -2,6 +2,14 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — New takes are titled after their track
+
+### Changed
+- **A new take takes its track's name.** *New take ▾* → Create / Cover / Hum pre-fills Title with the
+  track's name (editable; the form's own remembered title is left alone), and the server applies the same
+  rule to any `POST /api/jobs` with a `track_id` and no title — variations included, and for covers and
+  hums instead of the upload's file name. Regenerations (incl. ⇧ Quality) keep their parent's title.
+
 ## 2026-09-22 — Continue a recording from a clip, CFG on Cover and Hum
 
 ### Added

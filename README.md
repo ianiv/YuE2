@@ -215,8 +215,8 @@ cover prerequisites (`scripts/setup.py --with-cover`, ffmpeg) plus `librosa` (in
 **Projects** (`#/projects`) — albums and soundtracks. A project is an ordered tracklist of named
 *tracks*; jobs are attached to a track as *takes* (a job belongs to at most one track) and one
 finished take per track is *chosen*. On the project page (`#/project/<id>`) each track has a
-**New take** menu (Create / Cover / Hum open with a "New take for Project › Track" banner and the
-result lands in that track; *Add from Library…* opens the Library in multi-select with "Add to
+**New take** menu (Create / Cover / Hum open with a "New take for Project › Track" banner, the Title
+pre-filled with the track's name — edit it to name the take differently — and the result lands in that track; *Add from Library…* opens the Library in multi-select with "Add to
 project…" preset to the track). Takes are rated with 👍/👎, 1–5 stars and a note, sorted and
 filtered (one remembered preference shared by every project), and *Choose* marks the track's final
 take (only finished takes with audio).

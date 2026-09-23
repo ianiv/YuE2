@@ -34,6 +34,8 @@ export async function createView({ el, query, app }) {
     count: h("input", { id: "f-count", type: "number", min: 1, max: 16, step: 1, value: saved.count }),
     random: h("input", { id: "f-random", type: "checkbox", checked: !!saved.random_seeds }),
   };
+  // A new take is titled after its track (editable); the track name is not remembered as this form's title.
+  if (banner) f.title.value = banner.track.name;
   let cot = saved.cot;
   const cotSeg = h("div", { class: "seg", role: "group", "aria-label": "Mode" }, ["full", "melody", "off"].map((m) =>
     h("button", { type: "button", dataset: { m }, "aria-pressed": String(m === cot), onclick: () => { cot = m; cotSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === cot))); abcDetails.hidden = cot === "off"; } }, m)));
@@ -138,7 +140,7 @@ export async function createView({ el, query, app }) {
   function collect() {
     const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, cot, seed: f.seed.raw(), random_seed: f.seed.isRandom(),
       cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), abc: f.abc.value, count: Math.max(1, Number(f.count.value) || 1), random_seeds: f.random.checked, loras: loras.value(), ...presets.value() };
-    store.set("create", v);
+    store.set("create", trackId ? { ...v, title: saved.title } : v);
     return v;
   }
   form.addEventListener("input", collect);

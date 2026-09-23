@@ -58,6 +58,8 @@ export async function humView({ el, query, app }) {
     cfg: h("input", { id: "h-cfg", type: "number", min: 0, max: 20, step: 0.1, value: saved.cfg_scale ?? "", placeholder: "engine default" }),
     offset: h("input", { id: "h-offset", type: "number", min: 0, max: 600, step: 0.1, value: saved.offset_s, style: "width:110px" }),
   };
+  // A new take is titled after its track (editable); the track name is not remembered as this form's title.
+  if (banner) f.title.value = banner.track.name;
   // Claude assist: fills title/style/lyrics; applyFields returns the previous values so the box can undo.
   function applyFields(fields) {
     const prev = {};
@@ -110,7 +112,7 @@ export async function humView({ el, query, app }) {
 
   function collect() {
     const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, melody, adapter: f.adapter.value, hum_influence: Number(f.influence.value), offset_s: Math.max(0, Number(f.offset.value) || 0), cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() };
-    store.set("hum", v); return v;
+    store.set("hum", trackId ? { ...v, title: saved.title } : v); return v;
   }
   async function onSubmit(e) {
     e.preventDefault();
