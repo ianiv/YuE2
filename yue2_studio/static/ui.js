@@ -598,19 +598,11 @@ export function lyricsButton(job) {
 /** Kinds whose Quality re-render is a plain regenerate from the score (a hum's carrier is not kept). */
 const QUALITY_KINDS = new Set(["create", "regenerate", "cover"]);
 
-/** The Quality re-render of `job` among `candidates` (queued, running or done), if any. */
-export const qualityVersion = (job, candidates) => (candidates || []).find((x) =>
-  x.kind === "regenerate" && x.parent_id === job.id && x.preset === "quality" && ["queued", "running", "done"].includes(x.status)) || null;
-
-/** "⇧ Quality" for a finished Fast-preset song: regenerates it on the Quality preset from its own ABC
- *  score with the same seed, style, lyrics, title and LoRAs, as a take in the same project track.
- *  With `existing` (see qualityVersion) it links to that version instead. null when not applicable. */
-export function qualityButton(job, { existing = null, onQueued = null } = {}) {
+/** "⇧ Quality" for a finished Fast-preset song: queues a regenerate on the Quality preset from its own
+ *  ABC score with the same seed, style, lyrics, title and LoRAs, as a take in the same project track.
+ *  It only queues (a toast confirms) and never navigates. null when not applicable. */
+export function qualityButton(job, { onQueued = null } = {}) {
   if (job.status !== "done" || job.preset !== "fast" || !QUALITY_KINDS.has(job.kind) || !(job.artifacts && job.artifacts.score)) return null;
-  if (existing) {
-    const label = existing.status === "done" ? "✓ Quality version" : "Quality queued";
-    return h("a", { class: "btn ghost sm", href: existing.status === "done" ? `#/song/${existing.id}` : "#/queue", title: "A Quality re-render of this song already exists" }, label);
-  }
   const btn = h("button", { type: "button", class: "sm", title: "Regenerate on the Quality preset (bf16, 32 steps) from this song's score and seed",
     onclick: async () => {
       btn.disabled = true;
@@ -620,10 +612,10 @@ export function qualityButton(job, { existing = null, onQueued = null } = {}) {
         // seed/style/lyrics/title null = inherit from the parent; loras omitted = inherited too.
         const { job: queued } = await api.submit({ kind: "regenerate", preset: "quality", track_id: job.take ? job.take.track_id : null,
           params: { parent_id: job.id, abc, style: null, lyrics: null, seed: null, title: null } });
-        toast(`Queued a Quality version of “${jobTitle(job)}”`, "ok", { link: { href: "#/queue", label: "Queue" } });
-        btn.textContent = "Quality queued";
+        toast(`Queued a Quality version of “${jobTitle(job)}”`, "ok");
         if (onQueued) onQueued(queued);
-      } catch (e) { toastError(e); btn.disabled = false; }
+      } catch (e) { toastError(e); }
+      btn.disabled = false;
     } }, "⇧ Quality");
   return btn;
 }

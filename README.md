@@ -208,12 +208,14 @@ result lands in that track; *Add from Library…* opens the Library in multi-sel
 project…" preset to the track). Takes are rated with 👍/👎, 1–5 stars and a note, sorted and
 filtered (one remembered preference shared by every project), and *Choose* marks the track's final
 take (only finished takes with audio).
+Collapsing a track's *Takes* section is remembered per project in the browser, across repaints and
+reloads.
 Every take (and the chosen take) has a lyrics icon: hover or focus it to see the song's lyrics in a
 popup, click (tap) to keep it open, Esc or a click elsewhere to close.
 Finished takes made with the **Fast** preset also get **⇧ Quality** (on the project page and the song
 page): one click regenerates the song on the Quality preset from its own score with the same seed,
-style, lyrics, title and LoRAs, as a new take in the same track. The button then links to that
-version (✓ Quality version) instead of queueing another. Hum takes are left out (a regenerate would
+style, lyrics, title and LoRAs, as a new take in the same track. It only queues (a toast confirms;
+you stay on the page), so each click queues another Quality take. Hum takes are left out (a regenerate would
 drop the hum carrier) and so are `cot=off` songs, which have no score.
 Tracks are renamed in place and reordered by dragging the handle (or ↑/↓). **Play album** queues
 the chosen takes in tracklist order; **Export ZIP** downloads

@@ -1,5 +1,5 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, qualityButton, qualityVersion, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, qualityButton, loraPicker, presetPicker, projectPicker, projectTag, randomSeed, rememberGroup, renderScore, scorePlayer, seedField, STAGE_NAMES, takeControls, toast, toastError } from "../ui.js";
 import { playButton, player } from "../player.js";
 
 export async function songView({ el, param, app }) {
@@ -8,12 +8,10 @@ export async function songView({ el, param, app }) {
   catch (e) { fill(el, h("div", { class: "empty" }, e.status === 404 ? "This song does not exist (it may have been deleted)." : e.message, " ", h("a", { href: "#/library" }, "Back to library"))); return {}; }
   if (job.status === "queued" || job.status === "running") { fill(el, h("div", { class: "empty" }, "This job is still ", job.status, ". ", h("a", { href: "#/queue" }, "Watch it in the queue"))); return {}; }
   const p = job.params, t = job.timing || {};
-  const [abc, transcription, humAbc, trackTakes] = await Promise.all([
+  const [abc, transcription, humAbc] = await Promise.all([
     job.artifacts.score ? api.text(songUrl(job.id, "score.abc")).catch(() => "") : "",
     job.kind === "cover" && job.artifacts.transcription ? api.text(songUrl(job.id, "transcription/score.abc")).catch(() => "") : "",
     job.kind === "hum" && job.artifacts.hum ? api.text(songUrl(job.id, "hum/hum.abc")).catch(() => "") : "",
-    // A Fast take's track may already hold its Quality re-render (the ⇧ Quality button then links to it).
-    job.preset === "fast" && job.take ? api.jobs({ track: job.take.track_id, limit: 500 }).then((r) => r.jobs).catch(() => []) : [],
   ]);
 
   // Score editor + regenerate
@@ -131,7 +129,7 @@ export async function songView({ el, param, app }) {
       h("div", { class: "stack" },
         job.artifacts.audio ? h("div", { class: "panel stack" },
           h("div", { class: "row" }, playButton(job, { label: true, size: "" }), h("span", { class: "hint" }, "Playback controls are in the bar at the bottom.")),
-          h("div", { class: "row" }, h("a", { class: "btn sm", href: songUrl(job.id, "audio.flac"), download: true }, "Download FLAC"), h("a", { class: "btn sm", href: songUrl(job.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn sm", href: songUrl(job.id, "artifacts.zip") }, "artifacts.zip"), qualityButton(job, { existing: qualityVersion(job, trackTakes) }), h("span", { class: "spacer" }), h("button", { class: "ghost sm danger", onclick: remove }, "Delete"))) : null,
+          h("div", { class: "row" }, h("a", { class: "btn sm", href: songUrl(job.id, "audio.flac"), download: true }, "Download FLAC"), h("a", { class: "btn sm", href: songUrl(job.id, "audio.mp3"), download: true }, "MP3"), h("a", { class: "btn sm", href: songUrl(job.id, "artifacts.zip") }, "artifacts.zip"), qualityButton(job), h("span", { class: "spacer" }), h("button", { class: "ghost sm danger", onclick: remove }, "Delete"))) : null,
         h("section", { class: "panel stack" }, h("h3", {}, "Request"),
           h("p", {}, h("span", { class: "muted small", style: "text-transform:uppercase;letter-spacing:.05em" }, "Style "), p.style || "—"),
           h("pre", { class: "block lyrics-block", "aria-label": "Lyrics" }, p.lyrics || "—")),

@@ -2,6 +2,17 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — Quality button only queues, remembered takes sections
+
+### Changed
+- **Takes sections stay the way you left them.** A collapsed *Takes* section on the project page used
+  to reopen on every repaint and reload; its open/closed state is now kept per track in
+  `localStorage` (`yue2.project.takesClosed.<project id>`, pruned to the project's current tracks).
+- **⇧ Quality only queues.** It no longer turns into a "✓ Quality version" / "Quality queued" link
+  (which took you to the song page or the Queue) once a Quality re-render exists: every click queues
+  one, a toast confirms, and you stay where you are. `ui.qualityVersion` is gone and the song page no
+  longer fetches its track's takes.
+
 ## 2026-09-22 — One-click Quality re-render
 
 ### Added
