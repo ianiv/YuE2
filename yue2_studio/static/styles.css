@@ -241,6 +241,15 @@ ol.tracklist { list-style: none; margin: 0; padding: 0; display: flex; flex-dire
 button.track-n { padding: 2px 6px; }
 .track-title { flex: 1; min-width: 0; font-weight: 650; font-size: 15px; overflow-wrap: anywhere; }
 .track-title .inline-edit { display: inline-block; max-width: 100%; }
+/* Narrow layouts (the app's 760px breakpoint): the no-wrap header squeezed the title, down to one
+   character per line on phones. Let it wrap: handle, number and title share the first line, the
+   track controls move to a right-aligned second line. */
+@media (max-width: 760px) {
+  .track-head.row.nowrap { flex-wrap: wrap; row-gap: 8px; }
+  .track-head > .track-title { flex: 1 1 60%; }
+  .track-head > .spacer { display: none; }
+  .track-head > details.menu { margin-left: auto; }
+}
 .track details.takes > summary { font-size: 12px; }
 .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .take-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--bg); }
