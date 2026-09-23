@@ -273,3 +273,11 @@ details[open].menu > summary { margin-bottom: 0; }
 .panel.assist { gap: 8px; border-color: color-mix(in srgb, var(--accent) 40%, var(--accent-soft)); background: color-mix(in srgb, var(--accent-soft) 30%, var(--surface)); }
 .assist textarea { min-height: 0; }
 .assist .result { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; line-height: 1.4; }
+
+/* Lyrics popover (ui.js lyricsButton): one shared, fixed-position panel. */
+button.lyrics-btn { padding: 2px 5px; color: var(--muted); }
+button.lyrics-btn:hover, button.lyrics-btn[aria-expanded="true"] { color: var(--text); }
+.lyrics-pop { position: fixed; z-index: 40; width: min(360px, calc(100vw - 32px)); overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--shadow); padding: 10px 12px; }
+.lyrics-pop[hidden] { display: none; }
+.lyrics-pop-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.lyrics-pop pre.lyrics-block { margin: 0; font-size: 13px; }

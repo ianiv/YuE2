@@ -208,6 +208,8 @@ result lands in that track; *Add from Library…* opens the Library in multi-sel
 project…" preset to the track). Takes are rated with 👍/👎, 1–5 stars and a note, sorted and
 filtered (one remembered preference shared by every project), and *Choose* marks the track's final
 take (only finished takes with audio).
+Every take (and the chosen take) has a lyrics icon: hover or focus it to see the song's lyrics in a
+popup, click (tap) to keep it open, Esc or a click elsewhere to close.
 Tracks are renamed in place and reordered by dragging the handle (or ↑/↓). **Play album** queues
 the chosen takes in tracklist order; **Export ZIP** downloads
 `<name>/01 Track.flac …` plus `tracklist.json` / `tracklist.md` (tracks without a chosen take are
