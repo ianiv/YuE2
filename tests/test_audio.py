@@ -263,3 +263,22 @@ def test_build_zip_is_cached_until_a_member_changes(tmp_path):
     assert rebuilt.stat().st_mtime_ns != stamp
     with zipfile.ZipFile(rebuilt) as zf:
         assert "abc123/song/extra.txt" in zf.namelist()
+
+
+@pytest.mark.skipif(audio.ffmpeg_path() is None, reason="ffmpeg not installed")
+def test_extract_clip_cuts_the_requested_range(tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    sr = 48000
+    t = np.arange(4 * sr) / sr
+    source = tmp_path / "src.wav"
+    sf.write(source, np.stack([np.sin(2 * np.pi * 220 * t)] * 2, axis=1).astype(np.float32) * 0.5, sr)
+    seconds = audio.extract_clip(source, tmp_path / "out" / "clip.flac", start_s=1.0, end_s=2.5)
+    assert seconds == pytest.approx(1.5, abs=0.01)
+    info = sf.info(str(tmp_path / "out" / "clip.flac"))
+    assert info.samplerate == sr and info.channels == 2
+    assert audio.extract_clip(source, tmp_path / "tail.flac", start_s=3.0) == pytest.approx(1.0, abs=0.01)
+    with pytest.raises(ValueError, match="after the end"):
+        audio.extract_clip(source, tmp_path / "late.flac", start_s=10.0)
+    assert not (tmp_path / "late.flac").exists()

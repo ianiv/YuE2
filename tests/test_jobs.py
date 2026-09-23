@@ -139,6 +139,25 @@ def test_cover_requires_upload_and_defaults_title(store):
     assert jobs.engine_request(full)["cot"] == "full"
 
 
+def test_cover_mode_and_clip_validation(store):
+    lookup = lambda uid: {"filename": "demo.mp3"}  # noqa: E731
+    base = {"upload_id": "u1", "style": "jazz", "lyrics": "la"}
+    plain = jobs.submit(store, {"kind": "cover", "params": base}, upload_lookup=lookup).jobs[0]
+    assert plain.params["mode"] == "cover" and "clip_start_s" not in plain.params  # whole recording
+    job = jobs.submit(store, {"kind": "cover", "params": {**base, "mode": "continue", "clip_start_s": 5,
+                                                          "clip_end_s": 35.5}}, upload_lookup=lookup).jobs[0]
+    assert job.params["mode"] == "continue" and job.params["clip_start_s"] == 5.0
+    assert job.params["clip_end_s"] == 35.5 and jobs.engine_request(job)["cot"] == "melody"
+    start_only = jobs.submit(store, {"kind": "cover", "params": {**base, "clip_start_s": 60}},
+                             upload_lookup=lookup).jobs[0]
+    assert start_only.params["clip_start_s"] == 60.0 and start_only.params["clip_end_s"] is None
+    for bad in ({"mode": "continue", "task": "full"}, {"mode": "remix"}, {"clip_start_s": -1},
+                {"clip_start_s": 10, "clip_end_s": 10.5}, {"clip_end_s": 0}, {"clip_start_s": float("nan")},
+                {"clip_end_s": config.MAX_CLIP_S + 1}):
+        with pytest.raises(ValidationFailure):
+            jobs.submit(store, {"kind": "cover", "params": {**base, **bad}}, upload_lookup=lookup)
+
+
 def test_hum_submit_defaults_validation_and_engine_request(store):
     params = {"upload_id": "u1", "style": "lo-fi", "lyrics": "[verse]\nla"}
     body = {"kind": "hum", "params": params}

@@ -4,6 +4,8 @@ Importing ``yue2_studio.engine`` imports ``mlx`` and ``lyra`` (no GPU work is do
 is skipped where they are unavailable.
 """
 
+import contextlib
+
 import pytest
 
 from yue2_studio import config
@@ -37,6 +39,16 @@ class FakePipeline:
 
     def close(self):
         self.closed = True
+
+    def release_models(self):
+        pass
+
+    def log(self, message):
+        pass
+
+    @contextlib.contextmanager
+    def _status(self, label, **kwargs):
+        yield
 
     def set_loras(self, stack, hum_adapter=None):
         self.loras = list(stack)
@@ -195,6 +207,61 @@ def test_run_create_uses_planner_synthesizer_and_config_extra(engine, tmp_path):
     with_extra = {**base, "hum": {"x": 1}}
     assert identity({"request": {}, "config": base, "weights": {}}) != identity(
         {"request": {}, "config": with_extra, "weights": {}})
+
+
+@pytest.mark.parametrize("mode", ["cover", "continue"])
+def test_cover_song_clips_and_continues(engine, tmp_path, monkeypatch, mode):
+    """The clip is cut before transcription; continue mode plans from the trimmed open score."""
+    from yue2_studio import engine as engine_mod
+
+    score = "X:1\nK:C\nV: Vocal\nC D E |\nV: Vocal\nZ4|\n"
+    seen = {}
+
+    def extract_clip(src, dst, *, start_s, end_s):
+        seen["clip"] = (start_s, end_s)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"clip")
+        return 20.0
+
+    def transcribe(pipe, audio_path, transcription_dir, task, cancelled):
+        seen["transcribed"] = (audio_path.name, task)
+        transcription_dir.mkdir(parents=True)
+        (transcription_dir / "score.abc").write_text(score)
+        return {"source_audio_sha256": "abc123", "duration_seconds": 20.0}, 1.0
+
+    def run_create(pipe, fields, *args, planner=None, config_extra=None, abc_prefix="", **kwargs):
+        seen.update(fields=fields, planner=planner, config_extra=config_extra, abc_prefix=abc_prefix)
+        return {"truncated": None, "timing": {"e2e_seconds": 1.0}}
+
+    monkeypatch.setattr(engine_mod.audio_mod, "extract_clip", extract_clip)
+    monkeypatch.setattr(engine, "_transcribe", transcribe)
+    monkeypatch.setattr(engine, "_run_create", run_create)
+    src = tmp_path / "song.mp3"
+    src.write_bytes(b"audio")
+    summary = engine.cover_song(src, tmp_path / "job", task="melody-vocal",
+                                request={**REQUEST, "cot": "melody"}, options=config.resolve_preset("fast"),
+                                mode=mode, clip_start_s=10, clip_end_s=30)
+    assert seen["clip"] == (10.0, 30.0) and seen["transcribed"] == ("clip.flac", "melody-vocal")
+    assert summary["cover"]["clip"] == {"start_s": 10.0, "end_s": 30.0, "seconds": 20.0,
+                                        "path": "source/clip.flac"}
+    if mode == "cover":
+        assert seen["fields"]["abc"] == score and seen["planner"] is None and seen["config_extra"] is None
+    else:
+        opened = "X:1\nK:C\nV: Vocal\nC D E |\n"  # trailing rest bars trimmed
+        assert "abc" not in seen["fields"] and seen["abc_prefix"] == opened and seen["planner"] is not None
+        assert (tmp_path / "job" / "source" / "open.abc").read_text() == opened
+        assert seen["config_extra"]["continuation"]["source_audio_sha256"] == "abc123"
+        assert summary["cover"]["open_abc"] == "source/open.abc"
+
+
+def test_cover_song_rejects_bad_mode_and_clip(engine, tmp_path):
+    options = config.resolve_preset("fast")
+    for kwargs, match in (({"mode": "continue", "task": "full"}, "melody task"), ({"mode": "remix"}, "mode"),
+                          ({"clip_start_s": 5, "clip_end_s": 5.5}, "at least"),
+                          ({"clip_start_s": -1}, "non-negative")):
+        with pytest.raises(ValueError, match=match):
+            engine.cover_song(tmp_path / "x.mp3", tmp_path / "job", request=REQUEST, options=options,
+                              **{"task": "melody-full", **kwargs})
 
 
 def test_precision_change_rebuilds_but_ode_steps_does_not(engine):

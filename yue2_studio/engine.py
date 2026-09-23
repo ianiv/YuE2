@@ -557,8 +557,15 @@ class Engine:
 
     def cover_song(self, audio_path: Path, out_dir: Path, *, task: str = "melody-full", request: dict,
                    options: EngineOptions, on_event: EventCallback | None = None,
-                   cancelled: Cancelled | None = None) -> dict:
+                   cancelled: Cancelled | None = None, mode: str = "cover", clip_start_s: float = 0.0,
+                   clip_end_s: float | None = None) -> dict:
         """Transcribe ``audio_path`` then create a song from the transcribed score (``lyra.commands.cover``).
+
+        ``mode="cover"`` uses the transcription as the whole score. ``mode="continue"`` treats it like a
+        hum: trailing rests are trimmed and the open score is *continued* by the planner
+        (``StudioPipeline.plan_continuation``), so the song opens with the source's melody and YuE2
+        writes the rest; it needs a melody task. ``clip_start_s`` / ``clip_end_s`` cut the source
+        first (``source/clip.flac``); the open score is saved as ``source/open.abc``.
 
         Transcription runs in the worker thread under the resident pipeline's GPU guard
         (``transcribe`` takes no guard of its own; the guard's RLock permits same-thread nesting, and
@@ -568,30 +575,62 @@ class Engine:
         """
         if task not in {"full", "melody-full", "melody-vocal"}:
             raise ValueError("task must be full, melody-full or melody-vocal")
+        if mode not in {"cover", "continue"}:
+            raise ValueError("mode must be cover or continue")
+        if mode == "continue" and task == "full":
+            raise ValueError("Continuing a recording needs a melody task (melody-full or melody-vocal)")
+        clip = _clip_range(clip_start_s, clip_end_s)
         out_dir, audio_path = Path(out_dir), Path(audio_path)
         fields, generation, abc_sampling, semantic_sampling = self._split_request(request)
         if fields.get("abc") is not None:
             raise ValueError("Cover takes source audio, not a supplied score")
-        mode = "full" if task == "full" else "melody"
-        if fields.get("cot", mode) != mode:
+        cot = "full" if task == "full" else "melody"
+        if fields.get("cot", cot) != cot:
             raise ValueError("Cover mode must match the transcription task")
-        fields["cot"] = mode
+        fields["cot"] = cot
         SongRequest(**fields)  # validate text, seed and mode before spending time on transcription
-        transcription_dir = out_dir / "transcription"
-        for directory in (transcription_dir, out_dir / "song"):
+        transcription_dir, source_dir = out_dir / "transcription", out_dir / "source"
+        for directory in (transcription_dir, source_dir, out_dir / "song"):
             if directory.exists() and any(directory.iterdir()):
                 raise FileExistsError(f"Directory is not empty: {directory}")
         loras = self.resolve_loras(options.loras)
         pipe = self.ensure(options, on_event)
         pipe.stage_timings = {}
+        open_abc = None
+        clip_seconds = None
         with self._busy(pipe):
             pipe.set_loras(loras)
             pipe.release_models()
-            transcription, transcription_seconds = self._transcribe(pipe, audio_path, transcription_dir, task,
+            source = audio_path
+            if clip is not None:
+                with pipe._status("Cutting clip"):
+                    source = source_dir / "clip.flac"
+                    clip_seconds = audio_mod.extract_clip(audio_path, source, start_s=clip[0], end_s=clip[1])
+                end = "the end" if clip[1] is None else f"{clip[1]:g}s"
+                pipe.log(f"Clip: {clip[0]:g}s to {end} ({clip_seconds:.1f}s)")
+            transcription, transcription_seconds = self._transcribe(pipe, source, transcription_dir, task,
                                                                     cancelled)
             transcription_stages = dict(pipe.stage_timings)  # _run_create resets the per-job timings
             score = (transcription_dir / "score.abc").read_bytes().decode("utf-8")
-            song_fields = {**fields, "abc": score}
+            song_fields = dict(fields)
+            planner, abc_prefix, config_extra = None, "", None
+            if mode == "continue":
+                open_abc = hum_mod.trim_open_score(score)
+                if not hum_mod.open_score_has_notes(open_abc):
+                    raise ValueError("The transcription has no notes (only rests); pick a clip where the "
+                                     "melody is playing")
+                source_dir.mkdir(parents=True, exist_ok=True)
+                (source_dir / "open.abc").write_text(open_abc, encoding="utf-8")
+                pipe.log(f"Source score: {len(hum_mod.score_body_lines(open_abc))} lines with notes "
+                         "(open, to be continued)")
+                planner, abc_prefix = _continuation_planner(open_abc), open_abc
+                # The open score is not part of SongRequest, so it enters the identity here.
+                config_extra = {"continuation": {
+                    "source_audio_sha256": transcription["source_audio_sha256"], "task": task,
+                    "open_abc_sha256": hashlib.sha256(open_abc.encode()).hexdigest(),
+                }}
+            else:
+                song_fields["abc"] = score
             song_request = dict(song_fields)
             if generation:
                 song_request["generation_config"] = generation
@@ -602,17 +641,23 @@ class Engine:
             write_json(out_dir / "request.json", song_request)
             summary = self._run_create(pipe, song_fields, generation, abc_sampling, semantic_sampling,
                                        out_dir, options=options, cancelled=cancelled,
-                                       extra_stages=transcription_stages)
+                                       extra_stages=transcription_stages, planner=planner,
+                                       config_extra=config_extra, abc_prefix=abc_prefix)
+        clip_info = None if clip is None else {"start_s": clip[0], "end_s": clip[1], "seconds": clip_seconds,
+                                               "path": "source/clip.flac"}
         summary["transcription"] = {
             "dir": str(transcription_dir), "task": task, "seconds": transcription_seconds,
             "source_audio_sha256": transcription["source_audio_sha256"],
             "duration_seconds": transcription["duration_seconds"],
         }
         summary["timing"]["transcription_seconds"] = transcription_seconds
+        summary["cover"] = {"mode": mode, "clip": clip_info,
+                            "open_abc": "source/open.abc" if open_abc is not None else None}
         write_json(out_dir / "cover.json", {
-            "source_audio_sha256": transcription["source_audio_sha256"],
+            "source_audio_sha256": sha256_file(audio_path),
             "transcription": "transcription/result.json", "song": "song/result.json",
-            "backend": "mlx", "truncated": summary["truncated"], "task": task,
+            "backend": "mlx", "truncated": summary["truncated"], "task": task, "mode": mode,
+            "clip": clip_info,
         })
         write_json(out_dir / "summary.json", summary)
         return summary
@@ -750,10 +795,7 @@ class Engine:
             abc_prefix = ""
             if hum.melody == "continue":
                 abc_prefix = hum_abc
-
-                def planner(p, native, sampling, cancel, on_token):
-                    return p.plan_continuation(native, hum_abc, abc_sampling=sampling, cancelled=cancel,
-                                               on_token=on_token)
+                planner = _continuation_planner(hum_abc)
 
             synthesizer = None
             if adapter is not None:
@@ -785,6 +827,25 @@ class Engine:
         })
         write_json(out_dir / "summary.json", summary)
         return summary
+
+
+def _clip_range(start_s: float, end_s: float | None) -> tuple[float, float | None] | None:
+    """Validated ``(start, end)`` of a source clip, or ``None`` when the whole recording is used."""
+    start = float(start_s)
+    end = None if end_s is None else float(end_s)
+    if not np.isfinite(start) or start < 0 or (end is not None and not np.isfinite(end)):
+        raise ValueError("clip bounds must be finite and non-negative")
+    if end is not None and end - start < config.MIN_CLIP_S:
+        raise ValueError(f"the clip must be at least {config.MIN_CLIP_S:g}s long")
+    return None if start == 0 and end is None else (start, end)
+
+
+def _continuation_planner(open_abc: str) -> Callable[..., SymbolicPlan]:
+    """A ``_run_create`` planner that continues ``open_abc`` instead of planning from scratch."""
+    def planner(pipe, native, sampling, cancelled, on_token):
+        return pipe.plan_continuation(native, open_abc, abc_sampling=sampling, cancelled=cancelled,
+                                      on_token=on_token)
+    return planner
 
 
 def load_summary(out_dir: Path) -> dict | None:

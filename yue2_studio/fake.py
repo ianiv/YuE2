@@ -149,16 +149,24 @@ class FakeEngine:
             return self._run_create(run, request, out_dir, options)
 
     def cover_song(self, audio_path: Path, out_dir: Path, *, task: str = "melody-full", request: dict,
-                   options: EngineOptions, on_event=None, cancelled=None) -> dict:
+                   options: EngineOptions, on_event=None, cancelled=None, mode: str = "cover",
+                   clip_start_s: float = 0.0, clip_end_s: float | None = None) -> dict:
+        """Fake cover; ``mode="continue"`` streams the fake open score plus a continuation (like hum)."""
         self.calls.append(("cover_song", dict(request)))
         if task not in {"full", "melody-full", "melody-vocal"}:
             raise ValueError("task must be full, melody-full or melody-vocal")
+        if mode not in {"cover", "continue"}:
+            raise ValueError("mode must be cover or continue")
+        if mode == "continue" and task == "full":
+            raise ValueError("Continuing a recording needs a melody task (melody-full or melody-vocal)")
+        clip = (None if not clip_start_s and clip_end_s is None
+                else {"start_s": clip_start_s, "end_s": clip_end_s})
         if request.get("abc") is not None:
             raise ValueError("Cover takes source audio, not a supplied score")
-        mode = "full" if task == "full" else "melody"
-        if request.get("cot", mode) != mode:
+        cot = "full" if task == "full" else "melody"
+        if request.get("cot", cot) != cot:
             raise ValueError("Cover mode must match the transcription task")
-        request = {**request, "cot": mode}
+        request = {**request, "cot": cot}
         self._validate(request, allow_abc=False)
         out_dir, audio_path = Path(out_dir), Path(audio_path)
         if not audio_path.is_file():
@@ -175,14 +183,24 @@ class FakeEngine:
             (transcription_dir / "result.json").write_text(json.dumps(
                 {"fake": True, "status": "complete", "truncated": False, "task": task}))
             transcription_seconds = time.perf_counter() - started
-            song_request = {**request, "abc": FAKE_ABC}
-            (out_dir / "request.json").write_text(json.dumps(song_request))
-            summary = self._run_create(run, song_request, out_dir, options, provided_abc=True)
+            if mode == "continue":
+                (out_dir / "source").mkdir(parents=True, exist_ok=True)
+                (out_dir / "source" / "open.abc").write_text(FAKE_HUM_ABC)
+                song_request = {**request, "abc": None}
+                (out_dir / "request.json").write_text(json.dumps(song_request))
+                summary = self._run_create(run, song_request, out_dir, options, abc_prefix=FAKE_HUM_ABC)
+            else:
+                song_request = {**request, "abc": FAKE_ABC}
+                (out_dir / "request.json").write_text(json.dumps(song_request))
+                summary = self._run_create(run, song_request, out_dir, options, provided_abc=True)
         summary["transcription"] = {"dir": str(transcription_dir), "task": task,
                                     "seconds": transcription_seconds, "source_audio_sha256": "fake",
                                     "duration_seconds": 16.0}
         summary["timing"]["transcription_seconds"] = transcription_seconds
-        (out_dir / "cover.json").write_text(json.dumps({"fake": True, "task": task}))
+        summary["cover"] = {"mode": mode, "clip": clip,
+                            "open_abc": "source/open.abc" if mode == "continue" else None}
+        (out_dir / "cover.json").write_text(json.dumps({"fake": True, "task": task, "mode": mode,
+                                                        "clip": clip}))
         (out_dir / "summary.json").write_text(json.dumps(summary))
         return summary
 

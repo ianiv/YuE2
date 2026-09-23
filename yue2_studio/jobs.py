@@ -151,12 +151,28 @@ class RegenerateParams(_Params):
 
 
 class CoverParams(_Params):
+    """Cover: transcribe an upload (optionally a clip of it) and use the score.
+
+    ``mode="cover"`` follows the whole transcribed score; ``mode="continue"`` opens the song with it and
+    lets the planner write the rest (the hum-to-song continuation; needs a melody task).
+    """
+
     upload_id: str
     task: Literal["melody-full", "melody-vocal", "full"] = "melody-full"
+    mode: Literal["cover", "continue"] = "cover"
+    clip_start_s: float = Field(default=0.0, ge=0.0, le=config.MAX_CLIP_S, allow_inf_nan=False)
+    clip_end_s: float | None = Field(default=None, gt=0.0, le=config.MAX_CLIP_S, allow_inf_nan=False)
     style: str
     lyrics: str
     seed: int | None = None
     title: str | None = None
+
+    def check(self) -> None:
+        if self.mode == "continue" and self.task == "full":
+            raise ValidationFailure("mode=continue needs a melody task (melody-full or melody-vocal)")
+        if self.clip_end_s is not None and self.clip_end_s - self.clip_start_s < config.MIN_CLIP_S:
+            raise ValidationFailure(f"the clip must be at least {config.MIN_CLIP_S:g}s long "
+                                    "(clip_end_s after clip_start_s)")
 
     @field_validator("style")
     @classmethod
@@ -1355,6 +1371,7 @@ def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
 
     if req.kind == "cover":
         p = parse(CoverParams, req.params)
+        p.check()
         upload = upload_lookup(p.upload_id) if upload_lookup is not None else None
         if upload is None:
             raise NotFound(f"upload {p.upload_id!r} not found")
@@ -1363,8 +1380,10 @@ def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
         title = p.title if p.title is not None and p.title.strip() else None
         if title is None:
             title = Path(upload.get("filename", "")).stem or None
-        params = {"upload_id": p.upload_id, "task": p.task, "style": p.style, "lyrics": p.lyrics,
-                  "seed": seed, "title": title}
+        params = {"upload_id": p.upload_id, "task": p.task, "mode": p.mode, "style": p.style,
+                  "lyrics": p.lyrics, "seed": seed, "title": title}
+        if p.clip_start_s or p.clip_end_s is not None:
+            params.update(clip_start_s=float(p.clip_start_s), clip_end_s=p.clip_end_s)
         job = store.create(kind="cover", params=params, options=options, seed=seed)
         return Submission([job])
 

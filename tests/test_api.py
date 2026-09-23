@@ -748,7 +748,7 @@ async def test_upload_validation_and_cover(client, api, app):
                                                          "lyrics": "la"}})
     job = body["job"]
     assert job["kind"] == "cover" and job["title"] == "demo song" and job["params"]["task"] == "melody-full"
-    assert set(job["params"]) == {"upload_id", "task", "style", "lyrics", "seed", "title"}
+    assert set(job["params"]) == {"upload_id", "task", "mode", "style", "lyrics", "seed", "title"}
     progress, done = await api.events(job["id"])
     assert done["status"] == "done" and done["artifacts"]["transcription"] is True
     assert done["timing"]["transcribe"] is not None and done["timing"]["transcribe"] >= 0
