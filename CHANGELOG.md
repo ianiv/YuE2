@@ -2,6 +2,14 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — full-width track names on desktop
+
+### Fixed
+- **Track names use the whole header on desktop.** The track header's empty spacer took half of the
+  spare width, so long track names wrapped at about half the available space. The spacer is now
+  hidden at every width: the name grows into all of it and the track controls stay right-aligned
+  (e.g. a 56-character name fits one line at 1024 px instead of wrapping).
+
 ## 2026-09-22 — Project track headers on phones
 
 ### Fixed
