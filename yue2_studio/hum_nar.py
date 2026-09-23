@@ -60,8 +60,9 @@ class HumNAR(CachedNAR):
     """``CachedNAR`` whose hidden state receives the carrier projections; supports hum-channel CFG."""
 
     def __init__(self, model, chunk: Chunk, *, cond: np.ndarray, projections: list[Projection],
-                 inject_layers: list[int], query_chunk_size=None, cancelled=None):
-        super().__init__(model, chunk, query_chunk_size=query_chunk_size, cancelled=cancelled)
+                 inject_layers: list[int], query_chunk_size=None, cancelled=None, attention="exact"):
+        super().__init__(model, chunk, query_chunk_size=query_chunk_size, cancelled=cancelled,
+                         attention=attention)
         cond = np.asarray(cond, dtype=np.float32)
         if cond.shape != (self.nar_length - 2, _LATENT_DIM):
             self.close()
@@ -220,7 +221,7 @@ def synthesize_hum(pipe, semantic, *, cond: np.ndarray, adapter: lora_mod.Adapte
                 raise InterruptedError("Cancelled before acoustic prefill")
             engine = HumNAR(model, chunk, cond=cond[start:end], projections=projections,
                             inject_layers=adapter.inject_layers, query_chunk_size=pipe.query_chunk_size,
-                            cancelled=guarded)
+                            cancelled=guarded, attention=pipe.nar_attention)
             try:
                 def report(completed, _total, *, _index=index):
                     pipe.check_execution()

@@ -269,7 +269,7 @@ PATH`, `no API key: add one in Settings or set ANTHROPIC_API_KEY`, `assist is tu
 
 ### Settings
 
-`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "theme": "system", "prune_uploads_days": null,
+`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "fast_numerics": true, "theme": "system", "prune_uploads_days": null,
 "assist_provider": "auto", "assist_model": "", "has_api_key": false}`
 (`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
 total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`; `prune_uploads_days` integer 1..365 or `null` = off:
@@ -279,6 +279,7 @@ subset, ignores unknown keys, and returns the full object; a rejected patch (400
 
 | field | type | notes |
 |-------|------|-------|
+| `fast_numerics` | bool | default `true`. mlx-Yue's fast numerics for every job type: both CFG branches share one weight pass per AR token, and acoustic synthesis uses native BF16 attention instead of FP32-promoted attention (≈2.5× faster synthesis on M5; M1–M4 already skip the promotion). Numerically equivalent but not bit-identical, so a seed reproduces a song only in the mode it was made in (recorded as `fast_numerics` in `summary.json` and in `song/config.json`). Never rebuilds the pipeline |
 | `assist_provider` | enum(auto\|cli\|api\|off) | `auto` (default) = `claude` CLI if installed, else the API when a key is set |
 | `assist_model` | str | ≤ 80 chars, stripped; `""` = provider default (CLI: its own default; API: `claude-sonnet-5`). The API provider forces a `tool_use`, which `claude-fable-5-1` / the Mythos models reject — the API's 400 then surfaces as-is in a 502 `assist_failed` |
 | `anthropic_api_key` | str | **write-only**, ≤ 200 chars, stripped; stored in plain text in `data/app.db`. `PUT` semantics: key absent → unchanged, `""` → cleared, non-empty → saved. Never present in a response |
@@ -635,8 +636,9 @@ class Engine(Protocol):
 ```
 
 `EngineOptions` (`yue2_studio.config`): frozen dataclass `{precision, ode_steps, memory_budget_gib, require_ac,
-preset, loras}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *, memory_budget_gib,
-require_ac, loras=None)`. `loras` is `((name, scale), …)`; it never changes `build_key`. The real engine resolves
+preset, loras, fast_numerics}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *,
+memory_budget_gib, require_ac, loras=None, fast_numerics=True)`. `loras` is `((name, scale), …)`; neither it nor
+`fast_numerics` (set on the resident pipeline at the start of every job) changes `build_key`. The real engine resolves
 each name in `models/loras/` (`yue2_studio.lora.find_adapter`) before touching the GPU, then
 `StudioPipeline.set_loras` merges the stack into the AR / NAR weights as they load (a different stack drops the
 resident models first; they reload from the memory-mapped files). Merges show up as `"Merging LoRA into … model"`
@@ -671,8 +673,8 @@ The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` �
             "stages": {"Planning score": 15.8, "Generating song": 35.9, "Synthesizing audio": 27.0, "Decoding audio": 3.2, …},
             "transcription_seconds": 4.1},
  "truncated": {"abc": false, "semantic": true},
- "identity": "<sha256>", "preset": "fast", "precision": "8bit", "ode_steps": 8, "seed": 12300,
- "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}],
+ "identity": "<sha256>", "preset": "fast", "precision": "8bit", "ode_steps": 8, "fast_numerics": true,
+ "seed": 12300, "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}],
  "transcription": {"dir": "...", "task": "melody-full", "seconds": 4.1, "source_audio_sha256": "…", "duration_seconds": 16.0}}
 ```
 

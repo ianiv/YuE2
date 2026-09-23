@@ -23,6 +23,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MEMORY_BUDGET_GIB = 24
 DEFAULT_REQUIRE_AC = False
+# mlx-Yue ``fast_numerics``: batched CFG branches + native BF16 acoustic attention. Numerically
+# equivalent to the exact path but not bit-identical, so a seed made with one mode does not
+# reproduce under the other.
+DEFAULT_FAST_NUMERICS = True
 
 # Hugging Face repositories (revisions for the transcription models are the ones pinned by
 # lyra.transcription.model; scripts/setup.py asserts they still agree).
@@ -178,7 +182,8 @@ class EngineOptions:
     """Everything the engine needs to pick/build a pipeline and configure one job.
 
     ``loras`` is the ordered stack of ``(adapter name, scale)`` merged into the resident weights for
-    the job (see ``yue2_studio.lora``); it is per job and never forces a pipeline rebuild.
+    the job (see ``yue2_studio.lora``); it is per job and never forces a pipeline rebuild, and neither
+    does ``fast_numerics`` (read by the pipeline on every call).
     """
 
     precision: str = "bf16"
@@ -187,6 +192,7 @@ class EngineOptions:
     require_ac: bool = DEFAULT_REQUIRE_AC
     preset: str = "quality"
     loras: LoraStack = ()
+    fast_numerics: bool = DEFAULT_FAST_NUMERICS
 
     def __post_init__(self):
         if self.precision not in PRECISIONS:
@@ -225,6 +231,7 @@ def resolve_preset(
     memory_budget_gib: float = DEFAULT_MEMORY_BUDGET_GIB,
     require_ac: bool = DEFAULT_REQUIRE_AC,
     loras=None,
+    fast_numerics: bool = DEFAULT_FAST_NUMERICS,
 ) -> EngineOptions:
     preset = PRESETS.get(name)
     if preset is None:
@@ -242,6 +249,7 @@ def resolve_preset(
         require_ac=bool(require_ac),
         preset=preset.name,
         loras=normalise_loras(loras),
+        fast_numerics=bool(fast_numerics),
     )
 
 

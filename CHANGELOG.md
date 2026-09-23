@@ -2,6 +2,30 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — mlx-Yue perf branch
+
+### Changed
+- **mlx-Yue now comes from the `perf` branch of the
+  [ianiv/mlx-Yue](https://github.com/ianiv/mlx-Yue/tree/perf) fork** (commit `dd80c47`, upstream
+  `9253ed1` plus speed work). Exact mode reproduces `9253ed1` bit for bit (same ABC tokens, semantic
+  tokens and latents): the AR decode loop is software-pipelined (`async_eval` of the next token before
+  reading the current one; repetition window kept on device), RMSNorm tail / RoPE / SwiGLU are fused
+  with the same rounding points, RoPE uses shared full-context tables, and acoustic attention is no
+  longer tiled into 256-query calls (`query_chunk_size=None`; tiling was memory-only). On an M5 Max this
+  is 94 → 118 tok/s ABC, 97 → 123 tok/s semantic (bf16), 118 → 172 tok/s semantic (8-bit): the Quality
+  preset goes 173.6 → 147.0 s and Fast 88.6 → 69.6 s for `examples/full-song.json`.
+
+### Added
+- **Fast numerics** (`settings.fast_numerics`, default on; Settings → Generation). Passes
+  `fast_numerics=True` to mlx-Yue: native BF16 acoustic attention instead of FP32-promoted attention
+  (~2.5× faster synthesis on M5) and both CFG branches in one weight pass per token (~1.25× faster
+  CFG / `cot=off` semantic generation). Numerically equivalent, not bit-identical: without CFG a seed
+  gives the same take (latent cosine 0.9995, audio SNR ≈ 26 dB), with CFG a different one. Quality
+  preset 173.6 → 93.8 s, Fast 88.6 → 53.3 s, Quality with CFG 2.5 191.7 → 99.8 s. Applied per job
+  without rebuilding the pipeline (hum synthesis included) and recorded as `fast_numerics` in
+  `summary.json` and the song's `config.json`. `EngineOptions` / `resolve_preset` gain
+  `fast_numerics`; `scripts/smoke.py` gains `--exact-numerics`.
+
 ## 2026-09-21 — mlx-Yue 9253ed1
 
 ### Changed

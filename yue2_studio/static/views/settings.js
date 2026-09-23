@@ -4,11 +4,12 @@ import { applyTheme, confirmDialog, fill, fmt, h, loraLabel, store, toast, toast
 export async function settingsView({ el, app }) {
   let s;
   try { s = await api.settings(); app.settings = s; }
-  catch (e) { toastError(e); s = { default_preset: "quality", memory_budget_gib: 24, require_ac: false, theme: store.get("theme", "system"), prune_uploads_days: null }; }
+  catch (e) { toastError(e); s = { default_preset: "quality", memory_budget_gib: 24, require_ac: false, fast_numerics: true, theme: store.get("theme", "system"), prune_uploads_days: null }; }
   const f = {
     preset: h("select", { id: "st-preset" }, ["quality", "fast", "custom"].map((p) => h("option", { value: p, selected: p === s.default_preset }, p))),
     mem: h("input", { id: "st-mem", type: "number", min: 6, max: 44, step: 1, value: s.memory_budget_gib }),
     ac: h("input", { id: "st-ac", type: "checkbox", checked: !!s.require_ac }),
+    fast: h("input", { id: "st-fast", type: "checkbox", checked: s.fast_numerics !== false }),
     prune: h("input", { id: "st-prune", type: "number", min: 1, max: 365, step: 1, value: s.prune_uploads_days === null || s.prune_uploads_days === undefined ? "" : s.prune_uploads_days, placeholder: "never", style: "width:120px" }),
     theme: h("select", { id: "st-theme", onchange: (e) => applyTheme(e.target.value) }, [["system", "Follow system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => h("option", { value: v, selected: v === (s.theme || "system") }, l))),
     assistProvider: h("select", { id: "st-assist-provider" }, [["auto", "Auto — CLI if installed, else API key"], ["cli", "Claude CLI"], ["api", "API key"], ["off", "Off — hide the Ask Claude box"]].map(([v, l]) => h("option", { value: v, selected: v === (s.assist_provider || "auto") }, l))),
@@ -23,7 +24,7 @@ export async function settingsView({ el, app }) {
     if (!(mem >= 4 && mem <= 44)) { toast("Memory budget must be between 4 and 44 GiB", "err"); return null; }
     const prune = f.prune.value.trim() === "" ? null : Number(f.prune.value);
     if (prune !== null && !(Number.isInteger(prune) && prune >= 1 && prune <= 365)) { toast("Auto-delete uploads must be 1–365 days (or blank for never)", "err"); return null; }
-    const b = { default_preset: f.preset.value, memory_budget_gib: mem, require_ac: f.ac.checked, theme: f.theme.value, prune_uploads_days: prune, assist_provider: f.assistProvider.value, assist_model: f.assistModel.value.trim() };
+    const b = { default_preset: f.preset.value, memory_budget_gib: mem, require_ac: f.ac.checked, fast_numerics: f.fast.checked, theme: f.theme.value, prune_uploads_days: prune, assist_provider: f.assistProvider.value, assist_model: f.assistModel.value.trim() };
     if (f.apiKey.value) b.anthropic_api_key = f.apiKey.value;
     return b;
   }
@@ -61,6 +62,8 @@ export async function settingsView({ el, app }) {
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Default preset"), f.preset),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Memory budget (GiB, 6–44)"), f.mem, h("span", { class: "hint" }, "MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈11 GiB.")),
     h("label", { class: "check" }, f.ac, "Require AC power before running jobs"),
+    h("label", { class: "check" }, f.fast, "Fast numerics"),
+    h("span", { class: "hint" }, "Runs both CFG branches in one pass and uses native BF16 attention for synthesis (about 2.5× faster synthesis on M5). Songs differ very slightly from exact mode, so a seed only reproduces a song made in the same mode."),
     h("h3", {}, "Storage"),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Auto-delete unused uploads after N days (blank = never)"), f.prune,
       h("span", { class: "hint" }, "Uploads no job references are removed from data/uploads at startup and after each job; uploads a queued or running job needs are never touched. Manage them under Library → Uploads.")),
