@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — mlx-Yue perf branch
+## 2026-09-22 — mlx-Yue perf fork
 
 ### Changed
 - **mlx-Yue now comes from the `perf` branch of the
