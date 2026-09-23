@@ -2,6 +2,13 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — library generation time
+
+### Added
+- **Generation time on library cards.** Each finished song shows "made in …" (the job's end-to-end
+  `timing.e2e`); hovering it shows the per-stage split (transcribe / plan / semantic / synthesize /
+  decode) and the realtime factor. Frontend only: every finished job already records these timings.
+
 ## 2026-09-22 — mlx-Yue perf fork
 
 ### Changed

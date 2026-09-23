@@ -1,6 +1,15 @@
 import { api, songUrl } from "../api.js";
-import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectPicker, projectTag, store, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, groupLabel, h, jobTitle, loraLabel, modeLabel, projectPicker, projectTag, STAGE_NAMES, store, toast, toastError } from "../ui.js";
 import { playButton, player } from "../player.js";
+
+/** "made in 1m 34s" with the per-stage split and realtime factor as its tooltip; null without a recorded total. */
+function genTime(t) {
+  if (!t || !t.e2e) return null;
+  const stages = ["transcribe", "plan", "semantic", "synthesize", "decode"].filter((k) => t[k])
+    .map((k) => `${STAGE_NAMES[k]} ${fmt.secs(t[k])}`);
+  const rtf = t.audio_seconds ? ` · ${(t.e2e / t.audio_seconds).toFixed(2)}× realtime` : "";
+  return h("span", { title: `${stages.join(" · ")}${rtf}` }, "made in ", h("b", { class: "num" }, fmt.secs(t.e2e)));
+}
 
 /** Index of each job inside its group (API has no group endpoint). Order: the submit response's
  * job order if we remembered it, else Job.seq (submit order), then seed, then created_at. */
@@ -169,6 +178,7 @@ export async function libraryView({ el, query }) {
       h("p", { class: "small muted" }, fmt.excerpt(j.params.style, 90)),
       h("div", { class: "meta" },
         h("span", {}, h("b", { class: "num" }, fmt.dur(j.timing && j.timing.audio_seconds))),
+        genTime(j.timing),
         h("span", {}, "preset ", h("b", {}, j.preset)), j.loras && j.loras.length ? h("span", {}, "lora ", h("b", {}, loraLabel(j.loras))) : null, h("span", {}, "seed ", h("b", { class: "num" }, j.seed)),
         h("span", {}, "mode ", h("b", {}, modeLabel(j))), h("span", { title: j.created_at }, fmt.when(j.created_at)),
         j.truncated ? h("span", { class: "tag warn", title: j.truncated.reason }, "truncated") : null),

@@ -80,7 +80,8 @@ the ABC score streaming in while it is being planned, and a cancel button. Jobs 
 (the GPU allows one workload per process); cancelling a running job stops it at the next token /
 ODE step / decode chunk and the worker moves on.
 
-**Library** (`#/library`) — finished songs with play buttons, duration, preset, seed, mode and
+**Library** (`#/library`) — finished songs with play buttons, duration, generation time (hover for the
+per-stage split and realtime factor), preset, seed, mode and
 group badges; filters by kind, group and text; failed/cancelled jobs listed separately; delete; download FLAC / MP3 / `artifacts.zip`.
 
 **Song detail** (`#/song/<id>`) — play button, the request (style and the full lyrics, shown expanded
