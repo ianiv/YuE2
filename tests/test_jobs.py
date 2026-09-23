@@ -613,6 +613,31 @@ def test_submit_with_track_id_attaches_every_job(store):
         jobs.validate_submit({"kind": "create", "params": BASE, "track_id": 5})
 
 
+def test_new_takes_are_titled_after_their_track(store):
+    track = store.create_track(store.create_project("P")["id"], "Night Drive")
+    lookup = lambda uid: {"filename": "source file.mp3"}  # noqa: E731
+    tid = track["id"]
+    create = jobs.submit(store, {"kind": "create", "params": BASE, "track_id": tid}).jobs[0]
+    assert create.title == "Night Drive"
+    blank = jobs.submit(store, {"kind": "create", "params": {**BASE, "title": "  "}, "track_id": tid}).jobs[0]
+    assert blank.title == "Night Drive"
+    own = jobs.submit(store, {"kind": "create", "params": {**BASE, "title": "Mine"}, "track_id": tid}).jobs[0]
+    assert own.title == "Mine"  # an explicit title wins
+    sub = jobs.submit(store, {"kind": "variations", "track_id": tid, "params": {"count": 2, "base": BASE}})
+    assert [j.title for j in sub.jobs] == ["Night Drive"] * 2 and sub.group["label"] == "Night Drive ×2"
+    for kind in ("cover", "hum"):  # the track name beats the upload's file name
+        job = jobs.submit(store, {"kind": kind, "track_id": tid, "params": {"upload_id": "u", "style": "s",
+                                                                             "lyrics": "l"}},
+                          upload_lookup=lookup).jobs[0]
+        assert job.title == "Night Drive"
+    parent = jobs.submit(store, {"kind": "create", "params": {**BASE, "title": "Old name"}}).jobs[0]
+    regen = jobs.submit(store, {"kind": "regenerate", "track_id": tid,
+                                "params": {"parent_id": parent.id, "abc": "X:1"}}).jobs[0]
+    assert regen.title == "Old name"  # a re-render keeps its parent's title
+    loose = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
+    assert loose.title != "Night Drive"
+
+
 def test_take_and_project_body_validation():
     assert jobs.parse(jobs.ProjectBody, {"name": "  My  album "}).name == "My album"
     assert jobs.parse(jobs.ProjectBody, {"name": "x"}).description == ""

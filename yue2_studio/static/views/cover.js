@@ -48,6 +48,8 @@ export async function coverView({ el, query, app }) {
     clipStart: h("input", { id: "c-clip-start", type: "text", inputmode: "decimal", value: saved.clip_start || "", placeholder: "0:00", style: "width:90px", "aria-label": "Clip start" }),
     clipEnd: h("input", { id: "c-clip-end", type: "text", inputmode: "decimal", value: saved.clip_end || "", placeholder: "end", style: "width:90px", "aria-label": "Clip end" }),
   };
+  // A new take is titled after its track (editable); the track name is not remembered as this form's title.
+  if (banner) f.title.value = banner.track.name;
   // Claude assist: fills title/style/lyrics; applyFields returns the previous values so the box can undo.
   function applyFields(fields) {
     const prev = {};
@@ -118,7 +120,7 @@ export async function coverView({ el, query, app }) {
     } catch (e) { upload = null; toastError(e); fill(dropText, h("b", {}, "Upload failed"), " — click to try again"); collect(); }
   }
 
-  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, mode, clip_start: f.clipStart.value.trim(), clip_end: f.clipEnd.value.trim(), cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() }; store.set("cover", v); return v; }
+  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, mode, clip_start: f.clipStart.value.trim(), clip_end: f.clipEnd.value.trim(), cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() }; store.set("cover", trackId ? { ...v, title: saved.title } : v); return v; }
   async function onSubmit(e) {
     e.preventDefault();
     const v = collect();

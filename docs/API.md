@@ -134,7 +134,7 @@ are rejected as `adapter`.
 | `precision` | enum(bf16\|8bit\|4bit)? | only honoured when `preset=custom`; required then |
 | `ode_steps` | int? | 4..64; only honoured when `preset=custom`; required then |
 | `loras` | [LoraRef]? | adapters to merge, in order, at most 8, names unique; omitted = none (`regenerate`: inherited from the parent; send `[]` to clear) |
-| `track_id` | str? | attach every created job (all `variations` members) to this project track as a take; 404 `not_found` for an unknown track **before any job is written**. Never inferred from `parent_id`: a regenerate is only a take when the client says so |
+| `track_id` | str? | attach every created job (all `variations` members) to this project track as a take; 404 `not_found` for an unknown track **before any job is written**. Never inferred from `parent_id`: a regenerate is only a take when the client says so. A create / cover / hum / `variations` take with no title (missing or blank) is titled after the track (for covers and hums instead of the upload's file name); a regenerate keeps inheriting its parent's title |
 
 ### LoraRef
 

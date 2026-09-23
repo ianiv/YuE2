@@ -1320,17 +1320,41 @@ def submit(store: JobStore, body: Any, *, upload_lookup=None, lora_lookup=None,
     required for covers and hums. ``lora_lookup(name) -> bool`` says whether an adapter exists and is
     usable; ``hum_adapter_lookup(name) -> bool`` the same for hum-to-song adapters. A ``track_id``
     attaches every created job (all variations members) to that project track. Raises
-    ``ValidationFailure`` (400) / ``NotFound`` (404).
+    ``ValidationFailure`` (400) / ``NotFound`` (404). A new take with no title of its own is titled after
+    its track (``_title_from_track``).
     """
     req = validate_submit(body)
     if req.track_id is not None:
-        store.get_track(req.track_id)  # 404 before any row is written
+        track = store.get_track(req.track_id)  # 404 before any row is written
+        req = _title_from_track(req, track["name"])
     submission = _submit(store, req, upload_lookup=upload_lookup, lora_lookup=lora_lookup,
                          hum_adapter_lookup=hum_adapter_lookup)
     if req.track_id is not None:
         store.attach_takes(req.track_id, [job.id for job in submission.jobs])
         submission.jobs = [store.get(job.id) for job in submission.jobs]  # now carrying ``take``
     return submission
+
+
+def _title_from_track(req: SubmitRequest, name: str | None) -> SubmitRequest:
+    """Default a new take's blank title to its track's name (create, cover, hum and every variation).
+
+    An explicit title wins. Regenerations keep inheriting their parent's title: they are another
+    render of that song, not a fresh take.
+    """
+    name = (name or "").strip()
+    if not name or req.kind == "regenerate":
+        return req
+    params = dict(req.params)
+    if req.kind == "variations":
+        if not isinstance(params.get("base"), dict):
+            return req
+        params["base"] = base = dict(params["base"])
+    else:
+        base = params
+    title = base.get("title")
+    if not isinstance(title, str) or not title.strip():
+        base["title"] = name
+    return req.model_copy(update={"params": params})
 
 
 def _submit(store: JobStore, req: SubmitRequest, *, upload_lookup, lora_lookup,
