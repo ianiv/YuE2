@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — project track headers on phones
+## 2026-09-22 — Project track headers on phones
 
 ### Fixed
 - **Track headers on narrow screens.** The project page's no-wrap track header squeezed the track name
