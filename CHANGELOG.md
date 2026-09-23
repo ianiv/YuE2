@@ -2,6 +2,17 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — one-click Quality re-render
+
+### Added
+- **⇧ Quality** on finished Fast-preset takes (project page take rows and the song page). It submits a
+  `regenerate` from the song's own `score.abc` on the Quality preset, inheriting seed, style, lyrics,
+  title and LoRAs, with `track_id` set so the result is a take in the same track. Once a Quality
+  re-render exists (queued, running or done) the button becomes a link to it, so a second click
+  cannot queue a duplicate. Offered for create / regenerate / cover songs with a score; not for hum
+  songs (a regenerate drops the hum carrier) or `cot=off` songs. Frontend only (`ui.qualityButton`,
+  `ui.qualityVersion`).
+
 ## 2026-09-22 — Lyrics popup on the project page
 
 ### Added
