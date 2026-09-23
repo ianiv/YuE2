@@ -1,5 +1,5 @@
 import { albumUrl, api } from "../api.js";
-import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, lyricsButton, modeLabel, store, takeControls, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, lyricsButton, modeLabel, qualityButton, qualityVersion, store, takeControls, toast, toastError } from "../ui.js";
 import { playButton, player, trackOf } from "../player.js";
 
 const SORTS = [["added", "Added"], ["stars", "Stars"], ["thumbs", "Thumbs"]];
@@ -162,7 +162,7 @@ export async function projectView({ el, param, app }) {
           h("span", { class: `tag ${j.status === "done" ? "ok" : j.status === "failed" ? "err" : live ? "accent" : ""}` }, j.status + stage),
           live ? h("span", { class: "title" }, jobTitle(j)) : h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j)),
           lyricsButton(j), h("span", { class: "tag" }, j.kind)),
-        h("div", { class: "row", style: "gap:4px" }, chooseBtn, h("button", { class: "ghost sm", title: "Remove from this track (keeps the song)", onclick: () => detach(t, j) }, "Detach"))),
+        h("div", { class: "row", style: "gap:4px" }, qualityButton(j, { existing: qualityVersion(j, t.takes), onQueued: () => load({ quiet: true }) }), chooseBtn, h("button", { class: "ghost sm", title: "Remove from this track (keeps the song)", onclick: () => detach(t, j) }, "Detach"))),
       h("div", { class: "meta" },
         j.status === "done" ? h("span", {}, h("b", { class: "num" }, fmt.dur(j.timing && j.timing.audio_seconds))) : null,
         h("span", {}, "preset ", h("b", {}, j.preset)), h("span", {}, "seed ", h("b", { class: "num" }, j.seed)), h("span", {}, "mode ", h("b", {}, modeLabel(j))),
