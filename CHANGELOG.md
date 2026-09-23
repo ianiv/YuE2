@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — library generation time, song renaming
+## 2026-09-22 — Library generation time, song renaming
 
 ### Added
 - **Rename a song.** Click the title on a song's page to edit it (Enter or clicking away saves, Esc
