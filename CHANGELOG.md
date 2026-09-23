@@ -2,6 +2,15 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — project track headers on phones
+
+### Fixed
+- **Track headers on narrow screens.** The project page's no-wrap track header squeezed the track name
+  to one character per line at phone width. At 760 px and below (the app's narrow-layout breakpoint)
+  the header now wraps: handle, number and name share the first line and *New take ▾* / ↑ / ↓ /
+  *Delete track* move to a right-aligned second line, with no horizontal scroll. Wider layouts are
+  unchanged.
+
 ## 2026-09-22 — Quality button only queues, remembered Takes sections
 
 ### Changed
