@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — Continue a recording from the Cover page
+## 2026-09-22 — Continue a recording from a clip, CFG on Cover and Hum
 
 ### Added
 - **Continue from a clip.** Cover has a new *Melody* choice: *Cover the whole melody* (as before) or
