@@ -15,6 +15,10 @@ export async function projectView({ el, param, app }) {
   let project = null, unmounted = false;
   const prefs = { sort: "added", filter: "all", ...store.get("project.takes", {}) };
   const savePrefs = () => store.set("project.takes", { sort: prefs.sort, filter: prefs.filter });
+  // Collapsed "Takes" sections, remembered per project by track id (repaints and reloads keep them).
+  const closedKey = `project.takesClosed.${param}`;
+  const closedTakes = new Set(store.get(closedKey, []));
+  const saveClosed = () => store.set(closedKey, [...closedTakes]);
 
   // -- header ----------------------------------------------------------------------------------
   const nameEl = inlineEdit("", (name) => patchProject({ name }), { tag: "h1", title: "Click to rename" });
@@ -75,6 +79,8 @@ export async function projectView({ el, param, app }) {
 
   function paint() {
     if (unmounted || !project) return;
+    const trackIds = new Set(project.tracks.map((t) => t.id));
+    if ([...closedTakes].some((id) => !trackIds.has(id))) { for (const id of closedTakes) if (!trackIds.has(id)) closedTakes.delete(id); saveClosed(); }
     nameEl.set(project.name); descEl.set(project.description);
     document.title = `${project.name} · YuE2 Studio`;
     const n = project.tracks.length, m = project.tracks.filter((t) => t.chosen_job_id).length;
@@ -142,10 +148,12 @@ export async function projectView({ el, param, app }) {
     const chips = h("div", { class: "chips", role: "group", "aria-label": "Filter takes" }, FILTERS.map(([v, l]) => h("button", { type: "button", class: "chip", "aria-pressed": String(v === prefs.filter), onclick: () => { prefs.filter = v; savePrefs(); paint(); } }, l)));
     const shown = sortTakes(t.takes).filter(passes);
     fill(body, shown.length ? shown.map((j) => takeRow(t, j)) : h("p", { class: "muted small" }, t.takes.length ? "No takes match this filter." : "None yet."));
-    return h("details", { class: "takes", open: true },
+    const panel = h("details", { class: "takes", open: !closedTakes.has(t.id),
+      ontoggle: () => { if (panel.open === !closedTakes.has(t.id)) return; if (panel.open) closedTakes.delete(t.id); else closedTakes.add(t.id); saveClosed(); } },
       h("summary", {}, `Takes (${t.takes.length})`),
       t.takes.length ? h("div", { class: "row between", style: "margin-bottom:6px" }, chips, sortSel) : null,
       body);
+    return panel;
   }
   function takeRow(t, j) {
     const live = isLive(j);
