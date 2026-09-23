@@ -139,6 +139,22 @@ def test_cover_requires_upload_and_defaults_title(store):
     assert jobs.engine_request(full)["cot"] == "full"
 
 
+@pytest.mark.parametrize("kind", ["cover", "hum"])
+def test_cover_and_hum_carry_cfg_scale_to_the_engine(store, kind):
+    lookup = lambda uid: {"filename": "demo.mp3"}  # noqa: E731
+    base = {"upload_id": "u1", "style": "jazz", "lyrics": "la"}
+    plain = jobs.submit(store, {"kind": kind, "params": base}, upload_lookup=lookup).jobs[0]
+    assert plain.params["cfg_scale"] is None and "cfg_scale" not in jobs.engine_request(plain)
+    job = jobs.submit(store, {"kind": kind, "params": {**base, "cfg_scale": 2.5}},
+                      upload_lookup=lookup).jobs[0]
+    assert job.params["cfg_scale"] == 2.5
+    request = jobs.engine_request(job)
+    assert request["cfg_scale"] == 2.5 and request["cot"] == "melody"
+    for bad in (-1, 21, float("inf")):
+        with pytest.raises(ValidationFailure):
+            jobs.submit(store, {"kind": kind, "params": {**base, "cfg_scale": bad}}, upload_lookup=lookup)
+
+
 def test_cover_mode_and_clip_validation(store):
     lookup = lambda uid: {"filename": "demo.mp3"}  # noqa: E731
     base = {"upload_id": "u1", "style": "jazz", "lyrics": "la"}
@@ -166,7 +182,7 @@ def test_hum_submit_defaults_validation_and_engine_request(store):
     job = jobs.submit(store, body, upload_lookup=lambda uid: {"filename": "my hum.webm"}).jobs[0]
     assert job.kind == "hum" and job.title == "my hum"
     assert set(job.params) == {"upload_id", "style", "lyrics", "seed", "title", "melody", "adapter",
-                               "hum_influence", "offset_s"}
+                               "hum_influence", "offset_s", "cfg_scale"}
     assert (job.params["melody"], job.params["adapter"], job.params["hum_influence"],
             job.params["offset_s"]) == ("continue", None, 1.0, 0.0)
     assert jobs.engine_request(job) == {"style": "lo-fi", "lyrics": "[verse]\nla", "cot": "melody",

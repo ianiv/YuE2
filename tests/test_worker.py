@@ -227,11 +227,13 @@ async def test_cover_continue_job_streams_the_open_score_and_passes_the_clip(har
     (harness.paths.uploads_dir / "u3.mp3").write_bytes(b"not really audio")
     job = harness.submit({"kind": "cover", "params": {"upload_id": "u3", "style": "jazz", "lyrics": "la",
                                                       "mode": "continue", "task": "melody-vocal",
-                                                      "clip_start_s": 12.5, "clip_end_s": 40}})
+                                                      "clip_start_s": 12.5, "clip_end_s": 40,
+                                                      "cfg_scale": 2.5}})
     events, done = await harness.collect(job.id)
     assert done["status"] == "done" and done["params"]["mode"] == "continue"
     name, request = harness.engine.calls[-1]
     assert name == "cover_song" and request["cot"] == "melody" and "abc" not in request
+    assert request["cfg_scale"] == 2.5
     partial = [e["text"] for e in events if e["type"] == "abc" and e["partial"]]
     assert partial and all(t.startswith("X:1\nT:Hum\n") for t in partial)  # the source's open score leads
     summary = json.loads((harness.paths.songs_dir / job.id / "summary.json").read_text())

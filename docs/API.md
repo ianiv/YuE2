@@ -94,6 +94,7 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 | `lyrics` | str | required; with `mode=continue`, lyrics for the whole song (the first lines are sung over the clip's melody) |
 | `seed` | int? | random |
 | `title` | str? | defaults to upload filename stem |
+| `cfg_scale` | float? | `null` = engine default; 0..20; as on Create (e.g. 1.5–3 with the instrumental AR LoRA) |
 
 ### HumParams
 
@@ -108,6 +109,7 @@ values (`style`, `lyrics`, `cot`, `seed`, `abc`, `title`, `parent_id`, plus `cfg
 | `adapter` | str? | a `kind="hum"` adapter from `Status.hum.adapters` (400 if unknown, unusable, or a plain LoRA); without one only the score continuation runs |
 | `hum_influence` | float | 1.0; 0..3; classifier-free guidance on the decoder's hum channel (1 = as trained, 0 = no hum, ≠1 costs ~2× synthesis) |
 | `offset_s` | float | 0; 0..600; where the hum's carrier starts inside the song |
+| `cfg_scale` | float? | `null` = engine default; 0..20; classifier-free guidance of the song's AR branches, as on Create (separate from `hum_influence`) |
 
 Hum jobs always run with `cot=melody`; the transcription is `melody-vocal`. `Job.artifacts.hum` is true once
 `hum/hum.abc` (the open score) exists. Hum adapters are rejected in the `loras` stack (400) and plain LoRAs

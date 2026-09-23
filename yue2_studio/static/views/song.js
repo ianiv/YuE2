@@ -50,11 +50,11 @@ export async function songView({ el, param, app }) {
     try {
       // Covers: seed the variations from the transcription so the melody is kept (cot melody, as the cover flow does).
       const base = continued
-        ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: null, abc, title: p.title || null } // like hum: keep the continued score
+        ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc, title: p.title || null } // like hum: keep the continued score
         : job.kind === "cover"
-        ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: null, abc: transcription, title: p.title || null }
+        ? { style: p.style, lyrics: p.lyrics, cot: p.task === "full" ? "full" : "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: transcription, title: p.title || null }
         : job.kind === "hum"
-          ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: null, abc: abc || null, title: p.title || null } // variations keep the continued score
+          ? { style: p.style, lyrics: p.lyrics, cot: "melody", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: abc || null, title: p.title || null } // variations keep the continued score
           : { style: p.style, lyrics: p.lyrics, cot: p.cot || "full", seed: randomSeed(), cfg_scale: p.cfg_scale ?? null, abc: p.abc || null, title: p.title || null };
       const r = await api.submit({ kind: "variations", preset: job.preset, precision: job.precision, ode_steps: job.ode_steps, loras: loras.value(), track_id: trackId(), params: { count, base, random_seeds: false, label: null } });
       rememberGroup(r.group, r.jobs);

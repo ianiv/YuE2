@@ -9,7 +9,7 @@ const MIME_EXT = [["audio/mp4", "m4a"], ["audio/webm;codecs=opus", "webm"], ["au
 const MAX_RECORD_S = 120;
 
 export async function humView({ el, query, app }) {
-  const saved = store.get("hum", { style: "", lyrics: "", melody: "continue", adapter: "", hum_influence: 1, offset_s: 0, seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
+  const saved = store.get("hum", { style: "", lyrics: "", melody: "continue", adapter: "", hum_influence: 1, offset_s: 0, cfg_scale: "", seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
   let upload = null, dirty = false, melody = saved.melody;
   let trackId = null; // ?track=<id>: closure only, never in store("hum")
   const banner = await trackBanner(query.track, { onDismiss: () => { trackId = null; history.replaceState(null, "", "#/hum"); } });
@@ -55,6 +55,7 @@ export async function humView({ el, query, app }) {
     seed: seedField({ id: "h-seed", seed: saved.seed, random: saved.random_seed !== false, onChange: () => collect() }),
     adapter: h("select", { id: "h-adapter", onchange: () => { syncAdapter(); collect(); } }),
     influence: h("input", { id: "h-influence", type: "range", min: 0, max: 3, step: 0.05, value: saved.hum_influence, oninput: () => { influenceOut.textContent = Number(f.influence.value).toFixed(2); } }),
+    cfg: h("input", { id: "h-cfg", type: "number", min: 0, max: 20, step: 0.1, value: saved.cfg_scale ?? "", placeholder: "engine default" }),
     offset: h("input", { id: "h-offset", type: "number", min: 0, max: 600, step: 0.1, value: saved.offset_s, style: "width:110px" }),
   };
   // Claude assist: fills title/style/lyrics; applyFields returns the previous values so the box can undo.
@@ -108,7 +109,7 @@ export async function humView({ el, query, app }) {
   app.listeners.add(listener);
 
   function collect() {
-    const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, melody, adapter: f.adapter.value, hum_influence: Number(f.influence.value), offset_s: Math.max(0, Number(f.offset.value) || 0), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() };
+    const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, melody, adapter: f.adapter.value, hum_influence: Number(f.influence.value), offset_s: Math.max(0, Number(f.offset.value) || 0), cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() };
     store.set("hum", v); return v;
   }
   async function onSubmit(e) {
@@ -117,9 +118,10 @@ export async function humView({ el, query, app }) {
     if (!upload) return toast("Record or upload a hum first", "err");
     if (!v.style || !v.lyrics.trim()) return toast("Style and lyrics are required", "err");
     if (v.melody === "ignore" && !v.adapter) return toast("“Ignore the notes” needs a hum adapter", "err");
+    if (v.cfg_scale !== "" && !(v.cfg_scale >= 0 && v.cfg_scale <= 20)) return toast("CFG scale must be between 0 and 20", "err");
     submit.disabled = true;
     try {
-      const params = { upload_id: upload.upload_id, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null, melody: v.melody, adapter: v.adapter || null, hum_influence: v.hum_influence, offset_s: v.offset_s };
+      const params = { upload_id: upload.upload_id, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null, melody: v.melody, adapter: v.adapter || null, hum_influence: v.hum_influence, offset_s: v.offset_s, cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale };
       const r = await api.submit({ kind: "hum", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId, params });
       toast(`Queued “${r.job.title || upload.filename}”`, "ok"); location.hash = trackId ? `#/project/${banner.track.project_id}` : "#/queue";
     } catch (err) { toastError(err); submit.disabled = false; }
@@ -143,7 +145,9 @@ export async function humView({ el, query, app }) {
       prosodyBox,
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
-      h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
+      h("div", { class: "grid2" },
+        h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
+        h("label", { class: "field" }, h("span", { class: "lbl" }, "CFG scale"), f.cfg)),
       submit, h("p", { class: "hint" }, "The hum is transcribed (SheetSage2), the score is continued by the planner, and — with an adapter — its pitch and timing shape the decoder.")));
   fill(el, h("div", { class: "view-head" }, h("h1", {}, "Hum to song"), h("span", { class: "sub" }, "Hum a melody for 10–30 seconds, add a style and lyrics, get a whole song built around it.")), banner ? banner.el : null, form);
   // Restore the last-used upload only if it still exists on the server — and only if the user has not

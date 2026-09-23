@@ -20,7 +20,7 @@ function parseTime(text) {
 const showTime = (s) => { const m = Math.floor(s / 60), r = +(s % 60).toFixed(1); return m ? `${m}:${String(r).padStart(r < 10 ? 2 : 1, "0")}` : String(r); };
 
 export async function coverView({ el, query, app }) {
-  const saved = store.get("cover", { style: "", lyrics: "", task: "melody-full", mode: "cover", clip_start: "", clip_end: "", seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
+  const saved = store.get("cover", { style: "", lyrics: "", task: "melody-full", mode: "cover", clip_start: "", clip_end: "", cfg_scale: "", seed: "", random_seed: true, title: "", preset: (app.settings && app.settings.default_preset) || "quality", precision: "8bit", ode_steps: 16, loras: [], upload_id: "" });
   let upload = null, dirty = false, task = saved.task, mode = saved.mode === "continue" ? "continue" : "cover";
   let trackId = null; // ?track=<id>: closure only, never in store("cover")
   const banner = await trackBanner(query.track, { onDismiss: () => { trackId = null; history.replaceState(null, "", "#/cover"); } });
@@ -44,6 +44,7 @@ export async function coverView({ el, query, app }) {
     style: h("textarea", { id: "c-style", rows: 2, placeholder: "e.g. acoustic folk, male vocal, fingerpicked guitar", required: true }, saved.style),
     lyrics: h("textarea", { id: "c-lyrics", class: "lyrics", placeholder: "[Verse]\n…", required: true }, saved.lyrics),
     seed: seedField({ id: "c-seed", seed: saved.seed, random: saved.random_seed !== false, onChange: () => collect() }),
+    cfg: h("input", { id: "c-cfg", type: "number", min: 0, max: 20, step: 0.1, value: saved.cfg_scale ?? "", placeholder: "engine default" }),
     clipStart: h("input", { id: "c-clip-start", type: "text", inputmode: "decimal", value: saved.clip_start || "", placeholder: "0:00", style: "width:90px", "aria-label": "Clip start" }),
     clipEnd: h("input", { id: "c-clip-end", type: "text", inputmode: "decimal", value: saved.clip_end || "", placeholder: "end", style: "width:90px", "aria-label": "Clip end" }),
   };
@@ -117,7 +118,7 @@ export async function coverView({ el, query, app }) {
     } catch (e) { upload = null; toastError(e); fill(dropText, h("b", {}, "Upload failed"), " — click to try again"); collect(); }
   }
 
-  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, mode, clip_start: f.clipStart.value.trim(), clip_end: f.clipEnd.value.trim(), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() }; store.set("cover", v); return v; }
+  function collect() { const v = { title: f.title.value.trim(), style: f.style.value.trim(), lyrics: f.lyrics.value, task, mode, clip_start: f.clipStart.value.trim(), clip_end: f.clipEnd.value.trim(), cfg_scale: f.cfg.value === "" ? "" : Number(f.cfg.value), seed: f.seed.raw(), random_seed: f.seed.isRandom(), loras: loras.value(), upload_id: upload ? upload.upload_id : "", ...presets.value() }; store.set("cover", v); return v; }
   async function onSubmit(e) {
     e.preventDefault();
     const v = collect();
@@ -128,9 +129,10 @@ export async function coverView({ el, query, app }) {
     if (end !== null && end - (start || 0) < 1) return toast("The clip must end at least 1 s after it starts", "err");
     if (upload.seconds && start !== null && start >= upload.seconds) return toast(`The clip starts after the end of the recording (${fmt.dur(upload.seconds)})`, "err");
     const clip = start || end !== null ? { clip_start_s: start || 0, clip_end_s: end } : {};
+    if (v.cfg_scale !== "" && !(v.cfg_scale >= 0 && v.cfg_scale <= 20)) return toast("CFG scale must be between 0 and 20", "err");
     submit.disabled = true;
     try {
-      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId, params: { upload_id: upload.upload_id, task: v.task, mode: v.mode, ...clip, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null } });
+      const r = await api.submit({ kind: "cover", preset: v.preset, precision: v.precision, ode_steps: v.ode_steps, loras: v.loras, track_id: trackId, params: { upload_id: upload.upload_id, task: v.task, mode: v.mode, ...clip, cfg_scale: v.cfg_scale === "" ? null : v.cfg_scale, style: v.style, lyrics: v.lyrics, seed: f.seed.value(), title: v.title || null } });
       toast(`Queued ${mode === "continue" ? "continuation" : "cover"} “${r.job.title || upload.filename}”`, "ok"); location.hash = trackId ? `#/project/${banner.track.project_id}` : "#/queue";
     } catch (err) { toastError(err); submit.disabled = false; }
   }
@@ -146,7 +148,9 @@ export async function coverView({ el, query, app }) {
     h("div", { class: "panel sticky stack" },
       h("div", { class: "field" }, h("span", { class: "lbl" }, "Preset"), presets),
       h("div", { class: "field" }, h("span", { class: "lbl" }, "LoRA adapters"), loras),
-      h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
+      h("div", { class: "grid2" },
+        h("div", { class: "field" }, h("span", { class: "lbl" }, "Seed"), f.seed),
+        h("label", { class: "field" }, h("span", { class: "lbl" }, "CFG scale"), f.cfg)),
       submit, h("p", { class: "hint" }, "The upload (or the clip) is transcribed first (SheetSage2 + MERT), then the song is generated from that score — or, with Continue, grows out of it.")));
   setMode(mode); paintClipHint();
   fill(el, h("div", { class: "view-head" }, h("h1", {}, "Cover"), h("span", { class: "sub" }, "Transcribe an existing recording and re-imagine it in a new style, or continue it into a new song.")), banner ? banner.el : null, form);

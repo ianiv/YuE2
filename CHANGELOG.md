@@ -15,6 +15,9 @@ All notable changes to YuE2 Studio. Dates are when the work was merged to `main`
   either mode (`source/clip.flac`); switching to *Continue* with no end set suggests a 30 s clip.
   API: `CoverParams.mode`, `clip_start_s`, `clip_end_s`; the song page shows the melody mode and source
   range, and variations of a continued cover keep the continued score.
+- **CFG scale on Cover and Hum.** Both forms get the *CFG scale* field Create has (empty = engine default;
+  needed e.g. with the instrumental AR LoRA). `CoverParams.cfg_scale` / `HumParams.cfg_scale`; the song
+  page's regenerate and variations keep it.
 
 ## 2026-09-22 — Full-width track names on desktop
 

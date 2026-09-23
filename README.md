@@ -103,7 +103,8 @@ song is generated from the transcription:
 | `melody-vocal` | vocal melody only | `cot=melody` |
 | `full` | full score | `cot=full` |
 
-**Clip** (optional, `m:ss` or seconds) cuts the recording before transcription, so only that part is
+Cover and Hum take a **CFG scale** too (empty = engine default), as on Create — useful with the
+instrumental AR LoRA. **Clip** (optional, `m:ss` or seconds) cuts the recording before transcription, so only that part is
 used. **Melody** picks what happens to the transcription:
 
 - *Cover the whole melody* (default) — the transcription is the complete score, as above.
