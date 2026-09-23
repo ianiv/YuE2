@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — full-width track names on desktop
+## 2026-09-22 — Full-width track names on desktop
 
 ### Fixed
 - **Track names use the whole header on desktop.** The track header's empty spacer took half of the
