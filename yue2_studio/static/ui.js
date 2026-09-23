@@ -522,3 +522,73 @@ export function assistBox({ page, app, getContext, apply }) {
   onStatus(app.status);
   return { el, onStatus };
 }
+
+// -- lyrics popover --------------------------------------------------------------------------
+
+const LYRICS_ICON = '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3.5h7.5M2 7h7.5M2 10.5h4.5"/><path d="M13 4.5v7"/><path d="M13 4.5c.9.3 1.6.9 1.8 1.8"/><circle cx="11.5" cy="11.6" r="1.5"/></svg>';
+const lyricsPop = { el: null, owner: null, pinned: false, showTimer: 0, hideTimer: 0 };
+
+function lyricsPopEl() {
+  if (lyricsPop.el) return lyricsPop.el;
+  const el = h("div", { class: "lyrics-pop", role: "dialog", hidden: true,
+    onmouseenter: () => clearTimeout(lyricsPop.hideTimer), onmouseleave: () => { if (!lyricsPop.pinned) hideLyrics(150); } });
+  document.body.append(el);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !el.hidden) { const owner = lyricsPop.owner; hideLyrics(); owner && owner.focus(); } });
+  document.addEventListener("pointerdown", (e) => { if (!el.hidden && !el.contains(e.target) && !(lyricsPop.owner && lyricsPop.owner.contains(e.target))) hideLyrics(); });
+  // Fixed positioning would leave the popover behind when the page scrolls; scrolling inside it is fine.
+  window.addEventListener("scroll", (e) => { if (!el.hidden && !(e.target instanceof Node && el.contains(e.target))) hideLyrics(); }, true);
+  window.addEventListener("resize", () => hideLyrics());
+  // A repaint (e.g. live takes on the project page) can replace the hovered icon without a mouseleave.
+  document.addEventListener("mousemove", () => { if (!el.hidden && !lyricsPop.pinned && lyricsPop.owner && !lyricsPop.owner.isConnected) hideLyrics(); });
+  lyricsPop.el = el;
+  return el;
+}
+
+function showLyrics(btn, title, lyrics) {
+  clearTimeout(lyricsPop.hideTimer); clearTimeout(lyricsPop.showTimer);
+  const el = lyricsPopEl();
+  if (lyricsPop.owner && lyricsPop.owner !== btn) lyricsPop.owner.setAttribute("aria-expanded", "false");
+  lyricsPop.owner = btn;
+  btn.setAttribute("aria-expanded", "true");
+  el.setAttribute("aria-label", `Lyrics: ${title}`);
+  fill(el, h("div", { class: "lyrics-pop-title" }, title), h("pre", { class: "lyrics-block" }, lyrics));
+  el.hidden = false;
+  el.scrollTop = 0;
+  // Below the icon, flipped above when there is more room there; clamped to a 16px viewport gutter.
+  const r = btn.getBoundingClientRect(), gap = 6, pad = 16;
+  const w = el.offsetWidth, below = innerHeight - r.bottom - gap - pad, above = r.top - gap - pad;
+  const up = below < Math.min(el.scrollHeight, 240) && above > below;
+  el.style.maxHeight = `${Math.max(120, Math.min(up ? above : below, innerHeight * 0.6))}px`;
+  el.style.left = `${Math.min(Math.max(pad, r.left), innerWidth - w - pad)}px`;
+  el.style.top = up ? `${r.top - gap - el.offsetHeight}px` : `${r.bottom + gap}px`;
+}
+
+function hideLyrics(delay = 0) {
+  clearTimeout(lyricsPop.showTimer); clearTimeout(lyricsPop.hideTimer);
+  const go = () => {
+    if (!lyricsPop.el) return;
+    lyricsPop.el.hidden = true; lyricsPop.pinned = false;
+    if (lyricsPop.owner) lyricsPop.owner.setAttribute("aria-expanded", "false");
+    lyricsPop.owner = null;
+  };
+  if (delay) lyricsPop.hideTimer = setTimeout(go, delay); else go();
+}
+
+/** Small lyrics icon for a job: hovering or focusing it shows the lyrics in a popover, clicking pins
+ *  it open (touch screens), Esc or a click elsewhere closes it. null when the job has no lyrics. */
+export function lyricsButton(job) {
+  const lyrics = job && job.params && typeof job.params.lyrics === "string" ? job.params.lyrics.trim() : "";
+  if (!lyrics) return null;
+  const title = jobTitle(job);
+  const btn = h("button", { type: "button", class: "icon ghost sm lyrics-btn", "aria-label": `Lyrics of ${title}`, "aria-expanded": "false", "aria-haspopup": "dialog",
+    onmouseenter: () => { if (lyricsPop.pinned) return; clearTimeout(lyricsPop.hideTimer); lyricsPop.showTimer = setTimeout(() => showLyrics(btn, title, lyrics), 120); },
+    onmouseleave: () => { clearTimeout(lyricsPop.showTimer); if (!lyricsPop.pinned) hideLyrics(200); },
+    onfocus: () => { if (!lyricsPop.pinned) showLyrics(btn, title, lyrics); },
+    onblur: () => { if (!lyricsPop.pinned) hideLyrics(150); },
+    onclick: () => {
+      if (lyricsPop.pinned && lyricsPop.owner === btn) { hideLyrics(); return; }
+      showLyrics(btn, title, lyrics); lyricsPop.pinned = true;
+    } });
+  btn.innerHTML = LYRICS_ICON;
+  return btn;
+}

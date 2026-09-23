@@ -2,6 +2,15 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## Unreleased — lyrics popup on the project page
+
+### Added
+- **Lyrics popup on the project page.** Each take, and each track's chosen take, gets a small lyrics
+  icon; hovering or focusing it shows the song's title and lyrics in a popover (flips above the icon
+  near the bottom of the window, scrolls when long, fits phone widths). Clicking pins it open for
+  touch screens; Esc, a click elsewhere or scrolling the page closes it. Reusable as
+  `ui.lyricsButton(job)`.
+
 ## 2026-09-22 — Library generation time, song renaming
 
 ### Added

@@ -1,5 +1,5 @@
 import { albumUrl, api } from "../api.js";
-import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, modeLabel, store, takeControls, toast, toastError } from "../ui.js";
+import { confirmDialog, fill, fmt, h, inlineEdit, jobTitle, loraLabel, lyricsButton, modeLabel, store, takeControls, toast, toastError } from "../ui.js";
 import { playButton, player, trackOf } from "../player.js";
 
 const SORTS = [["added", "Added"], ["stars", "Stars"], ["thumbs", "Thumbs"]];
@@ -94,7 +94,7 @@ export async function projectView({ el, param, app }) {
     const name = inlineEdit(t.name, (v) => patchTrack(t, { name: v }), { cls: "track-name", title: "Click to rename" });
     const chosenBox = t.chosen
       ? h("div", { class: "chosen stack", style: "gap:4px" },
-        h("div", { class: "row small" }, playable(t) ? playButton(t.chosen, { sub: t.name }) : null, h("span", { class: "tag ok" }, "chosen"), h("a", { href: `#/song/${t.chosen.id}` }, jobTitle(t.chosen)), h("span", { class: "muted num" }, fmt.dur(t.chosen.timing && t.chosen.timing.audio_seconds)),
+        h("div", { class: "row small" }, playable(t) ? playButton(t.chosen, { sub: t.name }) : null, h("span", { class: "tag ok" }, "chosen"), h("a", { href: `#/song/${t.chosen.id}` }, jobTitle(t.chosen)), lyricsButton(t.chosen), h("span", { class: "muted num" }, fmt.dur(t.chosen.timing && t.chosen.timing.audio_seconds)),
           playable(t) ? null : h("span", { class: "hint" }, "Audio missing")))
       : h("div", { class: "chosen hint" }, t.takes.length ? "No take chosen yet — pick one below." : "No takes yet — make a new take or add songs from the Library.");
     const menu = h("details", { class: "menu" }, h("summary", { class: "btn sm" }, "New take ▾"),
@@ -161,7 +161,7 @@ export async function projectView({ el, param, app }) {
           canChoose ? playButton(j, { sub: t.name }) : null,
           h("span", { class: `tag ${j.status === "done" ? "ok" : j.status === "failed" ? "err" : live ? "accent" : ""}` }, j.status + stage),
           live ? h("span", { class: "title" }, jobTitle(j)) : h("a", { class: "title", href: `#/song/${j.id}` }, jobTitle(j)),
-          h("span", { class: "tag" }, j.kind)),
+          lyricsButton(j), h("span", { class: "tag" }, j.kind)),
         h("div", { class: "row", style: "gap:4px" }, chooseBtn, h("button", { class: "ghost sm", title: "Remove from this track (keeps the song)", onclick: () => detach(t, j) }, "Detach"))),
       h("div", { class: "meta" },
         j.status === "done" ? h("span", {}, h("b", { class: "num" }, fmt.dur(j.timing && j.timing.audio_seconds))) : null,
