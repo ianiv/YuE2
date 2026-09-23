@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — New takes are titled after their track
+## 2026-09-22 — New takes are titled after their track
 
 ### Changed
 - **A new take takes its track's name.** *New take ▾* → Create / Cover / Hum pre-fills Title with the
