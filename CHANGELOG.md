@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — one-click Quality re-render
+## 2026-09-22 — One-click Quality re-render
 
 ### Added
 - **⇧ Quality** on finished Fast-preset takes (project page take rows and the song page). It submits a
