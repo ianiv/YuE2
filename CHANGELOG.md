@@ -2,9 +2,12 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — library generation time
+## Unreleased — library generation time, song renaming
 
 ### Added
+- **Rename a song.** Click the title on a song's page to edit it (Enter or clicking away saves, Esc
+  cancels; clearing it falls back to the style excerpt). New `PATCH /api/jobs/{id} {"title"}` rewrites
+  `params.title` and the song folder's `job.json`; the player bar and play buttons pick up the new name.
 - **Generation time on library cards.** Each finished song shows "made in …" (the job's end-to-end
   `timing.e2e`); hovering it shows the per-stage split (transcribe / plan / semantic / synthesize /
   decode) and the realtime factor. Frontend only: every finished job already records these timings.

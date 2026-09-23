@@ -1489,3 +1489,25 @@ async def test_bundled_static_ui_is_served(make_app, home):
         assert r.status_code == 200 and "javascript" in r.headers["content-type"]
         r = await c.get("/static/styles.css")
         assert r.status_code == 200 and "text/css" in r.headers["content-type"]
+
+
+async def test_patch_job_renames_and_clears_the_title(app, client, api):
+    job = await api.create({**BASE, "title": "Draft"})
+    await api.wait(job["id"])
+    job_json = app.state.paths.songs_dir / job["id"] / "job.json"
+    r = await client.patch(f"/api/jobs/{job['id']}", json={"title": "  Final   Mix ", "style": "ignored"})
+    assert r.status_code == 200 and r.json()["job"]["title"] == "Final Mix"
+    assert (await api.get(job["id"]))["params"]["title"] == "Final Mix"
+    assert (await api.get(job["id"]))["params"]["style"] == BASE["style"]
+    assert json.loads(job_json.read_text())["params"]["title"] == "Final Mix"
+    r = await client.patch(f"/api/jobs/{job['id']}", json={})
+    assert r.status_code == 200 and r.json()["job"]["title"] == "Final Mix"
+    for cleared in ("   ", None):
+        await client.patch(f"/api/jobs/{job['id']}", json={"title": "x"})
+        r = await client.patch(f"/api/jobs/{job['id']}", json={"title": cleared})
+        assert r.status_code == 200 and r.json()["job"]["title"] is None
+        assert json.loads(job_json.read_text())["params"]["title"] is None
+    for bad in ({"title": "x" * 201}, {"title": 5}, []):
+        r = await client.patch(f"/api/jobs/{job['id']}", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
+    assert (await client.patch("/api/jobs/nope", json={"title": "x"})).status_code == 404

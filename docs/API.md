@@ -331,6 +331,12 @@ All query params optional. `status` and `kind` accept comma-separated lists (`st
 
 ### `GET /api/jobs/{id}` → 200 `{"job": Job}` | 404.
 
+### `PATCH /api/jobs/{id}` body `{"title": str | null}` → 200 `{"job": Job}` | 400 | 404.
+Renames a job in any status by rewriting `params.title` (and `params.title` in `data/songs/<id>/job.json`, which
+ships in `artifacts.zip`). Whitespace runs collapse; at most 200 characters; `""` or `null` clears the title, so
+`Job.title` becomes `null` and the UI falls back to the style excerpt. Other keys are ignored and `{}` changes
+nothing. The song page's heading is the click-to-rename control.
+
 ### `DELETE /api/jobs/{id}` → **204** (removes DB row and `data/songs/<id>/`) | 404 | 409 if `running`.
 Deleting a `queued` job cancels it first. Deleting the last member of a group deletes the group too.
 

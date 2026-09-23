@@ -84,7 +84,7 @@ ODE step / decode chunk and the worker moves on.
 per-stage split and realtime factor), preset, seed, mode and
 group badges; filters by kind, group and text; failed/cancelled jobs listed separately; delete; download FLAC / MP3 / `artifacts.zip`.
 
-**Song detail** (`#/song/<id>`) — play button, the request (style and the full lyrics, shown expanded
+**Song detail** (`#/song/<id>`) — click the title to rename the song; play button, the request (style and the full lyrics, shown expanded
 under it), per-stage timing, and the score rendered with abcjs next to an editable ABC
 textarea. **Regenerate from this score** submits a `regenerate`
 job that keeps the lyrics and seed (style editable) and generates audio from your edited score; the

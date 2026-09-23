@@ -43,6 +43,7 @@ export const api = {
   projects: () => request("GET", "/api/projects"),
   createProject: (body) => request("POST", "/api/projects", body),
   project: (id) => request("GET", `/api/projects/${id}`),
+  patchJob: (id, patch) => request("PATCH", `/api/jobs/${id}`, patch),
   patchProject: (id, patch) => request("PATCH", `/api/projects/${id}`, patch),
   removeProject: (id) => request("DELETE", `/api/projects/${id}`),
   addTrack: (projectId, name) => request("POST", `/api/projects/${projectId}/tracks`, { name }),

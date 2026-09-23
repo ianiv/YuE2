@@ -353,6 +353,28 @@ async def get_job(request: Request, job_id: str):
     return {"job": describe(request, _get_job(request, job_id))}
 
 
+@router.patch("/jobs/{job_id}")
+async def patch_job(request: Request, job_id: str):
+    body = await _body(request, jobs.JobPatch)
+    if "title" not in body.model_fields_set:
+        return {"job": describe(request, _get_job(request, job_id))}
+    job = _store(request).set_title(job_id, body.title)
+    await asyncio.to_thread(_retitle_job_json, _song_dir(request, job_id), body.title)
+    return {"job": describe(request, job)}
+
+
+def _retitle_job_json(song_dir: Path, title: str | None) -> None:
+    """Keep the song folder's ``job.json`` (it ships in ``artifacts.zip``) in step with a rename."""
+    path = song_dir / "job.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict) and isinstance(data.get("params"), dict):
+        data["params"]["title"] = title
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
 @router.delete("/jobs/{job_id}", status_code=204)
 async def delete_job(request: Request, job_id: str):
     job = _get_job(request, job_id)
