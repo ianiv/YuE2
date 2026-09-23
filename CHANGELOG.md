@@ -2,7 +2,7 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
-## Unreleased — Quality button only queues, remembered takes sections
+## 2026-09-22 — Quality button only queues, remembered Takes sections
 
 ### Changed
 - **Takes sections stay the way you left them.** A collapsed *Takes* section on the project page used
