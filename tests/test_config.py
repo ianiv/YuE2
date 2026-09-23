@@ -59,12 +59,19 @@ def test_named_presets(name, precision, steps):
     assert (options.preset, options.precision, options.ode_steps) == (name, precision, steps)
     assert options.memory_budget_gib == config.DEFAULT_MEMORY_BUDGET_GIB
     assert options.require_ac is config.DEFAULT_REQUIRE_AC
+    assert options.fast_numerics is config.DEFAULT_FAST_NUMERICS
 
 
 def test_named_preset_accepts_overrides():
-    options = config.resolve_preset("fast", ode_steps=16, memory_budget_gib=20, require_ac=True)
-    assert (options.precision, options.ode_steps, options.memory_budget_gib, options.require_ac) == (
-        "8bit", 16, 20.0, True)
+    options = config.resolve_preset("fast", ode_steps=16, memory_budget_gib=20, require_ac=True,
+                                    fast_numerics=False)
+    assert (options.precision, options.ode_steps, options.memory_budget_gib, options.require_ac,
+            options.fast_numerics) == ("8bit", 16, 20.0, True, False)
+
+
+def test_fast_numerics_never_forces_a_pipeline_rebuild():
+    exact = config.resolve_preset("quality", fast_numerics=False)
+    assert exact.build_key == config.resolve_preset("quality", fast_numerics=True).build_key
 
 
 def test_custom_preset_requires_and_validates_fields():

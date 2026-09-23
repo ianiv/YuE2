@@ -494,6 +494,7 @@ class Engine:
         song_dir, plan_dir = out_dir / "song", out_dir / "plan"
         pipe.stage_timings = {}
         pipe.generation_config = GenerationConfig.from_dict({**generation, "ode_steps": options.ode_steps})
+        pipe.fast_numerics = options.fast_numerics
         observer = pipe.token_observer(abc_prefix=abc_prefix)
         pipe.check_execution()
         native = pipe.build_request(**fields)
@@ -546,6 +547,7 @@ class Engine:
             "preset": options.preset,
             "precision": options.precision,
             "ode_steps": options.ode_steps,
+            "fast_numerics": options.fast_numerics,
             "seed": native.seed,
             "loras": loras_to_api(options.loras),
         }

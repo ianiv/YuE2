@@ -304,6 +304,9 @@ class SettingsModel(_Params):
     default_preset: Literal["quality", "fast", "custom"] = "quality"
     memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB, ge=6, le=44)
     require_ac: bool = config.DEFAULT_REQUIRE_AC
+    # mlx-Yue fast numerics (batched CFG, native BF16 acoustic attention): much faster on M5, but a
+    # seed only reproduces a song made in the same mode.
+    fast_numerics: bool = config.DEFAULT_FAST_NUMERICS
     theme: Literal["system", "light", "dark"] = "system"
     # Auto-delete uploads no job references after this many days; None = never.
     prune_uploads_days: int | None = Field(default=None, ge=1, le=365)
@@ -512,6 +515,7 @@ class Job:
             memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
             require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC),
             loras=self.loras,
+            fast_numerics=settings.get("fast_numerics", config.DEFAULT_FAST_NUMERICS),
         )
 
     def to_api(self) -> dict:
@@ -1213,6 +1217,7 @@ def resolve_options(req: SubmitRequest, settings: dict, *, default_preset: str |
             preset, precision, ode_steps,
             memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
             require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC), loras=loras,
+            fast_numerics=settings.get("fast_numerics", config.DEFAULT_FAST_NUMERICS),
         )
     except ValueError as error:
         raise ValidationFailure(str(error)) from None

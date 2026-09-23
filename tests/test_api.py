@@ -96,8 +96,8 @@ async def test_status_reflects_queue_and_engine(client, api, app):
 
 
 DEFAULT_PUBLIC_SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                           "theme": "system", "prune_uploads_days": None, "assist_provider": "auto",
-                           "assist_model": "", "has_api_key": False}
+                           "fast_numerics": True, "theme": "system", "prune_uploads_days": None,
+                           "assist_provider": "auto", "assist_model": "", "has_api_key": False}
 
 
 async def test_settings_get_and_partial_put(client, monkeypatch):
@@ -150,6 +150,7 @@ async def test_settings_api_key_is_write_only(client, app, monkeypatch):
     ({"memory_budget_gib": 100}, False), ({"memory_budget_gib": "lots"}, False),
     ({"default_preset": "fast"}, True), ({"default_preset": "ultra"}, False),
     ({"require_ac": True}, True), ({"require_ac": 3}, False),
+    ({"fast_numerics": False}, True), ({"fast_numerics": 3}, False),
     ({"theme": "light"}, True), ({"theme": "neon"}, False),
     ({"prune_uploads_days": 1}, True), ({"prune_uploads_days": 365}, True),
     ({"prune_uploads_days": None}, True),

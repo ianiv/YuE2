@@ -31,7 +31,8 @@ dev = ["pytest", "pytest-asyncio", "httpx", "ruff"]
 package = true
 
 [tool.uv.sources]
-mlx-yue = { git = "https://github.com/vanch007/mlx-Yue", rev = "9253ed1" }
+# ianiv/mlx-Yue perf branch: vanch007/mlx-Yue 9253ed1 + pipelined AR decode, fused kernels, fast numerics.
+mlx-yue = { git = "https://github.com/ianiv/mlx-Yue", rev = "dd80c47" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["yue2_studio"]

@@ -210,6 +210,17 @@ def test_precision_change_rebuilds_but_ode_steps_does_not(engine):
     assert engine.state == "cold"
 
 
+@pytest.mark.parametrize("fast", [True, False])
+def test_fast_numerics_is_applied_per_job_without_rebuild(engine, tmp_path, fast):
+    engine.ensure(config.resolve_preset("quality", fast_numerics=not fast))
+    pipe = engine.pipeline
+    pipe.plan_error = InterruptedError("Cancelled during abc")  # stop right after the per-job setup
+    with pytest.raises(InterruptedError):
+        engine.create_song(REQUEST, tmp_path / "job",
+                           options=config.resolve_preset("quality", fast_numerics=fast))
+    assert engine.pipeline is pipe and pipe.fast_numerics is fast
+
+
 @pytest.mark.skipif(not (config.CONVERTED_DIR / "qwen.tiktoken").is_file(), reason="models/converted missing")
 def test_open_score_cut_is_an_exact_token_boundary_with_the_real_tokenizer():
     """The continuation tokenises exactly like a score written in one go when the cut ends a line."""

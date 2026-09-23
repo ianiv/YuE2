@@ -21,10 +21,14 @@ internet for score rendering) and the optional soundfont download for the score 
 ## Setup
 
 ```bash
-uv sync                                          # creates .venv with Python 3.12 + mlx-Yue @ 9253ed1
+uv sync                                          # creates .venv with Python 3.12 + mlx-Yue (ianiv fork, perf branch)
 uv run python scripts/setup.py --with-cover      # downloads weights into models/ and prints a doctor report
 uv run yue2-studio --open                        # http://127.0.0.1:8765
 ```
+
+mlx-Yue comes from the `perf` branch of the [ianiv/mlx-Yue](https://github.com/ianiv/mlx-Yue/tree/perf) fork,
+pinned by commit in `pyproject.toml`: upstream `9253ed1` plus the speed work described under
+[Measured timings](#measured-timings-m5-max-48-gb-macos-27-memory-budget-24-gib).
 
 `scripts/setup.py` downloads [vanch007/mlx-Yue2-3B](https://huggingface.co/vanch007/mlx-Yue2-3B)
 (pre-converted MLX weights) and [m-a-p/YuE2-Vae](https://huggingface.co/m-a-p/YuE2-Vae) into
@@ -101,7 +105,8 @@ song is generated from the transcription:
 Cover is disabled (and the API answers 409) until the transcription models and ffmpeg are present;
 `#/settings` and `GET /api/status` say what is missing.
 
-**Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power, theme,
+**Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power,
+fast numerics (on by default, see [Measured timings](#measured-timings-m5-max-48-gb-macos-27-memory-budget-24-gib)), theme,
 Claude assist (below), plus a live engine panel (state, precision, memory, merged LoRAs, current job,
 model paths, the LoRA adapters found in `models/loras/` and why any of them is unusable).
 
@@ -214,26 +219,51 @@ track or project only detaches the songs; deleting a chosen song clears the trac
 
 | Preset | Precision (AR) | ODE steps (NAR) | Notes |
 |---|---|---|---|
-| **Quality** | `bf16` | 32 | Reference quality; ~1× realtime on an M5 Max. |
-| **Fast** | `8bit` | 8 | ~2× faster than realtime; the 8-bit AR still loads the BF16 AR for NAR conditioning. |
+| **Quality** | `bf16` | 32 | Reference quality; ~0.55× realtime on an M5 Max (fast numerics). |
+| **Fast** | `8bit` | 8 | ~3.5× faster than realtime; the 8-bit AR still loads the BF16 AR for NAR conditioning. |
 | **Custom** | `bf16` / `8bit` / `4bit` | 4–64 | Precision is fixed per resident pipeline (changing it rebuilds, well under a second); steps are per job. |
 
-### Measured timings (M5 Max, 48 GB, macOS 27, mlx-Yue `ab0f058`, memory budget 24 GiB)
+### Measured timings (M5 Max, 48 GB, macOS 27, memory budget 24 GiB)
 
-Full song = `examples/full-song.json` (City Pop, ~3 min, `cot=full`, no supplied score). RTF is
-generation time ÷ audio length (lower is faster; < 1 is faster than realtime).
+Full song = `examples/full-song.json` (City Pop, ~3 min, `cot=full`, no supplied score, seed 12300);
+"CFG 2.5" is the same request with `cfg_scale: 2.5` (two AR branches per semantic token; `cot=off` always
+runs two branches too). RTF is generation time ÷ audio length (lower is faster; < 1 is faster than
+realtime). *Stock* is upstream mlx-Yue `9253ed1`; *exact* and *fast numerics* are the fork's `perf` branch.
 
-| Preset | ABC planning | Semantic tokens | NAR (synthesis) | VAE (decode) | End-to-end | Audio | RTF |
+| Run | ABC planning | Semantic tokens | NAR (synthesis) | VAE | End-to-end | Audio | RTF |
 |---|---|---|---|---|---|---|---|
-| Fast (8bit, 8 steps) | 131 tok/s (2072 tok, 15.8 s) | 129 tok/s (35.9 s) | 27.2 s | 3.4 s | **82.4 s** | 184.7 s | 0.45 |
-| Quality (bf16, 32 steps) | 92.6 tok/s (1966 tok, 21.2 s) | 98.6 tok/s (4309 tok, 43.7 s) | 95.8 s | 3.5 s | **164.5 s** | 172.3 s | 0.95 |
+| Fast preset — stock | 122 tok/s (17.0 s) | 118 tok/s (39.0 s) | 29.1 s | 3.4 s | 88.6 s | 184.7 s | 0.48 |
+| Fast preset — exact | 175 tok/s (11.8 s) | 172 tok/s (26.9 s) | 27.4 s | 3.4 s | 69.6 s | 184.7 s | 0.38 |
+| Fast preset — fast numerics | 176 tok/s (11.8 s) | 172 tok/s (26.9 s) | 11.1 s | 3.4 s | **53.3 s** | 184.7 s | 0.29 |
+| Quality — stock | 94 tok/s (20.9 s) | 97 tok/s (44.4 s) | 104.2 s | 3.9 s | 173.6 s | 172.3 s | 1.01 |
+| Quality — exact | 118 tok/s (16.7 s) | 123 tok/s (35.1 s) | 91.9 s | 3.1 s | 147.0 s | 172.3 s | 0.85 |
+| Quality — fast numerics | 117 tok/s (16.7 s) | 123 tok/s (35.2 s) | 38.5 s | 3.2 s | **93.8 s** | 172.3 s | 0.54 |
+| Quality, CFG 2.5 — stock | 94 tok/s (20.9 s) | 61 tok/s (69.7 s) | 97.9 s | 3.1 s | 191.7 s | 170.0 s | 1.13 |
+| Quality, CFG 2.5 — exact | 117 tok/s (16.8 s) | 81 tok/s (52.4 s) | 89.8 s | 3.1 s | 162.2 s | 170.0 s | 0.95 |
+| Quality, CFG 2.5 — fast numerics | 117 tok/s (16.8 s) | 102 tok/s (41.9 s) | 37.9 s | 3.1 s | **99.8 s** | 170.6 s | 0.58 |
 
-Quickstart clip (`examples/quickstart.json`, 16 s, score supplied): Fast 4.2 s, Quality 7.6 s
+**Exact** runs reproduce stock bit for bit (identical ABC tokens, semantic tokens and latents in all
+three cases). The speed comes from a software-pipelined AR decode loop (the next token's forward pass
+is queued before the current one is read back, so the GPU never waits on Python) and fused RMSNorm /
+RoPE / SwiGLU kernels with the same rounding points; AR decode is now at the M5 Max's memory
+bandwidth (weights + KV cache).
+
+**Fast numerics** (Settings, on by default) adds two changes that are numerically equivalent but not
+bit-identical: acoustic attention runs as native BF16 SDPA instead of FP32-promoted SDPA (on M5 the
+promoted path cannot use the GPU's neural accelerators and was ~60 % of synthesis time; M1–M4 already
+skip the promotion, so they gain less there), and the two CFG branches share one weight pass per token.
+Without CFG the song is the same take: latents differ by 2.5–3 % RMS (cosine 0.9995, audio SNR ≈ 26 dB,
+comparable to mlx-Yue's own port-vs-PyTorch difference). With CFG the sampled tokens diverge, so the
+same seed gives a different take than exact mode. Untick *Fast numerics* when you need to reproduce a
+song made before this change (or in exact mode) from its seed.
+
+Quickstart clip (`examples/quickstart.json`, 16 s, score supplied, fast numerics): Fast 3.3 s, Quality 5.9 s
+(stock: 4.2 s, 7.6 s)
 end-to-end. Model verification + first load adds ~3–5 s to the first job of a session; the
 `Saving artifacts` stage is negligible. Reproduce with
 
 ```bash
-uv run python scripts/smoke.py --preset quality --example examples/full-song.json
+uv run python scripts/smoke.py --preset quality --example examples/full-song.json   # add --exact-numerics for exact mode
 ```
 
 ## Command line
@@ -357,8 +387,8 @@ timings), `docs/PLAN.md` (design), `docs/API.md` (contract).
   ([SheetSage2](https://huggingface.co/m-a-p/SheetSage2),
   [MERT-v2-FullSong](https://huggingface.co/m-a-p/MERT-v2-FullSong)) carry their own licences on
   their model cards.
-- [mlx-Yue](https://github.com/vanch007/mlx-Yue) (the engine this studio wraps, pinned at
-  `9253ed1`) is licensed under the
+- [mlx-Yue](https://github.com/vanch007/mlx-Yue) (the engine this studio wraps; `9253ed1` plus the
+  speed work on the [ianiv/mlx-Yue](https://github.com/ianiv/mlx-Yue/tree/perf) `perf` branch) is licensed under the
   [Apache License 2.0](https://github.com/vanch007/mlx-Yue/blob/main/LICENSE). The example
   requests in `examples/` are copied from it.
 - [abcjs](https://github.com/paulrosen/abcjs) (MIT) renders and plays the scores in the browser. It
