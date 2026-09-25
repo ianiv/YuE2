@@ -219,7 +219,7 @@ def synthesize_hum(pipe, semantic, *, cond: np.ndarray, adapter: lora_mod.Adapte
     ranges = chunk_ranges(len(semantic.tokens), len(plan.prefix), int(context))
     # Low-memory mode: the BF16 AR (with the user's AR LoRAs merged) precomputes each chunk's
     # conditioning and is released before the NAR loads; ``None`` otherwise (nothing is loaded).
-    # TODO(mlx-Yue pin): call ``pipe.acoustic_conditioning`` directly once the pin provides it.
+    # ``getattr``: an mlx-Yue older than the pin (``uv sync`` not run) has no such method.
     precompute = getattr(pipe, "acoustic_conditioning", None)
     conds = None if precompute is None else precompute(chunks, cancelled=guarded)
     if conds is not None:

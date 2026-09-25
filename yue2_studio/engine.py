@@ -395,8 +395,8 @@ class Engine:
             if self._pipe is None:
                 self._state = "loading"
                 try:
-                    # TODO(mlx-Yue pin): always pass ``low_memory=options.low_memory`` once the pin has
-                    # the kwarg; until then it is passed only when on, so the mode off keeps working.
+                    # Passed only when on, so a stale environment (code pulled, ``uv sync`` not run) still
+                    # works with the mode off and says what to do with it on.
                     extra = {"low_memory": True} if options.low_memory else {}
                     if extra and self._pipeline_factory is StudioPipeline:
                         _require_low_memory_support()

@@ -26,7 +26,7 @@ export async function settingsView({ el, app }) {
   function memHint(st) {
     const ram = st.machine_ram_gib;
     const cap = ram ? ` This Mac has ${Math.round(ram)} GiB of RAM, so the most allowed is ${memMax} GiB (4 GiB stays free for macOS); a larger saved budget is lowered to that.` : "";
-    return `MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈11 GiB, ≈7 GiB in low-memory mode (estimate).${cap}`;
+    return `MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈10 GiB, ≈5.5 GiB in low-memory mode.${cap}`;
   }
   /** The whole settings object from the form (validated; null + toast when a field is out of range). */
   function body() {
@@ -73,7 +73,7 @@ export async function settingsView({ el, app }) {
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Default preset"), f.preset),
     h("label", { class: "field" }, h("span", { class: "lbl" }, `Memory budget (GiB, ${memMin}–${memMax})`), f.mem, h("span", { class: "hint" }, memHint(s))),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Low-memory mode"), f.lowMem,
-      h("span", { class: "hint" }, "Loads the models one at a time so a song fits in ~7 GiB; costs a second or two per Quality song. Auto turns it on for Macs with 24 GB or less.")),
+      h("span", { class: "hint" }, "Loads the models one at a time so a song fits in ~5.5 GiB; costs a second or two per Quality song. Auto turns it on for Macs with 24 GB or less.")),
     h("label", { class: "check" }, f.ac, "Require AC power before running jobs"),
     h("label", { class: "check" }, f.fast, "Fast numerics"),
     h("span", { class: "hint" }, "Runs both CFG branches in one pass and uses native BF16 attention for synthesis (about 2.5× faster synthesis on M5). Songs differ very slightly from exact mode, so a seed only reproduces a song made in the same mode."),

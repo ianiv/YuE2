@@ -12,7 +12,7 @@ internet for score rendering) and the optional soundfont download for the score 
 
 | | |
 |---|---|
-| Hardware | Apple Silicon Mac with **16 GB or more**. Peak use is ~11 GiB of unified memory normally and ~7 GiB in low-memory mode (estimate, to be measured), which Settings turns on automatically on Macs with 24 GB or less. The memory budget defaults to 24 GiB capped at total RAM − 4 GiB (12 GiB on a 16 GB Mac). 32 GB+ runs everything at full speed; timings below are from an M5 Max / 48 GB. |
+| Hardware | Apple Silicon Mac with **16 GB or more**. A 3-minute song peaks at ~10 GiB of unified memory normally and ~5.3 GiB in low-memory mode, which Settings turns on automatically on Macs with 24 GB or less. The memory budget defaults to 24 GiB capped at total RAM − 4 GiB (12 GiB on a 16 GB Mac). 32 GB+ runs everything at full speed; timings below are from an M5 Max / 48 GB. |
 | macOS | **14.2 or newer** on M1–M4 chips; **26.2 or newer on M5** chips (mlx-Yue checks the chip via `mx.device_info()` and refuses older versions). Native arm64 Python only — not Intel or Rosetta. |
 | Python | 3.12 (fetched automatically by `uv`; the project is pinned to `>=3.12,<3.13`). |
 | Tools | [`uv`](https://docs.astral.sh/uv/) and `ffmpeg` on `PATH` (`brew install uv ffmpeg`). ffmpeg is needed for MP3 export, upload probing and covers. |
@@ -126,8 +126,9 @@ current job, model paths, the LoRA adapters found in `models/loras/` and why any
 
 **Low-memory mode** loads the models one at a time: planning and song generation use the AR as usual,
 then synthesis precomputes the acoustic conditioning with the BF16 AR, releases it and only then loads
-the acoustic model, so a song fits in ~7 GiB (estimate, to be measured) instead of ~11 GiB, with
-bit-identical audio. It also relaxes mlx-Yue's swap / available-memory guard. The cost is reloading the
+the acoustic model, and decoding releases both, so a 3-minute song peaks at 5.3 GiB instead of 10.2 GiB
+(Fast preset, M5 Max, same wall time) with bit-identical audio. It also relaxes mlx-Yue's swap /
+available-memory / pressure guard. The cost is reloading the
 models on every job (about 0.2–2.5 s per Quality song), so *Auto* (the default) turns it on only for Macs
 with 24 GB or less, or when the memory budget is below 14 GiB; *On* / *Off* force it. Changing it rebuilds
 the pipeline on the next job, and each song's `summary.json` records `low_memory`.
@@ -297,8 +298,8 @@ end-to-end. Model verification + first load adds ~3–5 s to the first job of a 
 uv run python scripts/smoke.py --preset quality --example examples/full-song.json   # add --exact-numerics for exact mode
 ```
 
-(`--low-memory on|off|auto` picks the low-memory mode; the printed `mlx_peak_gib` and `load` timings are
-how the ~7 GiB low-memory estimate above is to be confirmed.)
+(`--low-memory on|off|auto` picks the low-memory mode; the script prints the run's `mlx_peak_gib` and
+`load` timings.)
 
 ## Command line
 
@@ -386,7 +387,7 @@ timings), `docs/PLAN.md` (design), `docs/API.md` (contract).
   `config` first; if you embed the package elsewhere, import `yue2_studio.config` before `mlx`.
 - **`MemoryError: Process footprint exceeds budget` / job fails then the engine shows `cold`.**
   The pipeline's memory watchdog tripped the configured budget (Settings → Memory budget). Peak use
-  is ~11 GiB for generation (~7 GiB in low-memory mode, estimate); covers release the song models
+  is ~10 GiB for generation (~5.3 GiB in low-memory mode); covers release the song models
   before loading SheetSage2 + MERT (~3 GiB) and reload them lazily afterwards. On a 16 GB Mac the
   budget tops out at 12 GiB, so keep low-memory mode on (Auto does that). After any non-cancellation
   failure the pipeline is discarded (the guard latches the error) and the next job rebuilds it

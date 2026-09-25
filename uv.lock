@@ -475,7 +475,7 @@ wheels = [
 [[package]]
 name = "mlx-yue"
 version = "0.1.0"
-source = { git = "https://github.com/ianiv/mlx-Yue?rev=dd80c47#dd80c47f98e06372c4183d79ed923d4c027d1cec" }
+source = { git = "https://github.com/ianiv/mlx-Yue?rev=1332b14#1332b148bf5588c357a14323a03c9b9e9f2b2737" }
 dependencies = [
     { name = "mlx" },
     { name = "mlx-lm" },
@@ -1257,7 +1257,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "huggingface-hub" },
     { name = "librosa" },
-    { name = "mlx-yue", extras = ["transcription"], git = "https://github.com/ianiv/mlx-Yue?rev=dd80c47" },
+    { name = "mlx-yue", extras = ["transcription"], git = "https://github.com/ianiv/mlx-Yue?rev=1332b14" },
     { name = "psutil" },
     { name = "python-multipart" },
     { name = "sse-starlette" },
