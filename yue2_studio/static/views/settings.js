@@ -4,10 +4,13 @@ import { applyTheme, confirmDialog, fill, fmt, h, loraLabel, store, toast, toast
 export async function settingsView({ el, app }) {
   let s;
   try { s = await api.settings(); app.settings = s; }
-  catch (e) { toastError(e); s = { default_preset: "quality", memory_budget_gib: 24, require_ac: false, fast_numerics: true, theme: store.get("theme", "system"), prune_uploads_days: null }; }
+  catch (e) { toastError(e); s = { default_preset: "quality", memory_budget_gib: 24, require_ac: false, fast_numerics: true, low_memory: "auto", theme: store.get("theme", "system"), prune_uploads_days: null }; }
+  // The budget range is the machine's: mlx-Yue refuses more than total RAM − 4 GiB (older servers: 6–44).
+  const memMin = s.min_memory_budget_gib ?? 6, memMax = s.max_memory_budget_gib ?? 44;
   const f = {
     preset: h("select", { id: "st-preset" }, ["quality", "fast", "custom"].map((p) => h("option", { value: p, selected: p === s.default_preset }, p))),
-    mem: h("input", { id: "st-mem", type: "number", min: 6, max: 44, step: 1, value: s.memory_budget_gib }),
+    mem: h("input", { id: "st-mem", type: "number", min: memMin, max: memMax, step: 1, value: s.memory_budget_gib }),
+    lowMem: h("select", { id: "st-lowmem" }, [["auto", autoLabel(s)], ["on", "On"], ["off", "Off"]].map(([v, l]) => h("option", { value: v, selected: v === (s.low_memory || "auto") }, l))),
     ac: h("input", { id: "st-ac", type: "checkbox", checked: !!s.require_ac }),
     fast: h("input", { id: "st-fast", type: "checkbox", checked: s.fast_numerics !== false }),
     prune: h("input", { id: "st-prune", type: "number", min: 1, max: 365, step: 1, value: s.prune_uploads_days === null || s.prune_uploads_days === undefined ? "" : s.prune_uploads_days, placeholder: "never", style: "width:120px" }),
@@ -18,19 +21,27 @@ export async function settingsView({ el, app }) {
     apiKey: h("input", { id: "st-assist-key", type: "password", autocomplete: "new-password", placeholder: keyPlaceholder(s), "aria-label": "Anthropic API key" }),
   };
   function keyPlaceholder(st) { return st.has_api_key ? "•••••• key saved" : "sk-ant-…"; }
+  /** "Auto" plus what it resolves to on this Mac with the saved budget (unknown on an older server). */
+  function autoLabel(st) { return typeof st.low_memory_effective === "boolean" && (st.low_memory || "auto") === "auto" ? `Auto — ${st.low_memory_effective ? "on" : "off"} for this Mac` : "Auto"; }
+  function memHint(st) {
+    const ram = st.machine_ram_gib;
+    const cap = ram ? ` This Mac has ${Math.round(ram)} GiB of RAM, so the most allowed is ${memMax} GiB (4 GiB stays free for macOS); a larger saved budget is lowered to that.` : "";
+    return `MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈10 GiB, ≈5.5 GiB in low-memory mode.${cap}`;
+  }
   /** The whole settings object from the form (validated; null + toast when a field is out of range). */
   function body() {
     const mem = Number(f.mem.value);
-    if (!(mem >= 4 && mem <= 44)) { toast("Memory budget must be between 4 and 44 GiB", "err"); return null; }
+    if (!(mem >= memMin && mem <= memMax)) { toast(`Memory budget must be between ${memMin} and ${memMax} GiB on this Mac`, "err"); return null; }
     const prune = f.prune.value.trim() === "" ? null : Number(f.prune.value);
     if (prune !== null && !(Number.isInteger(prune) && prune >= 1 && prune <= 365)) { toast("Auto-delete uploads must be 1–365 days (or blank for never)", "err"); return null; }
-    const b = { default_preset: f.preset.value, memory_budget_gib: mem, require_ac: f.ac.checked, fast_numerics: f.fast.checked, theme: f.theme.value, prune_uploads_days: prune, assist_provider: f.assistProvider.value, assist_model: f.assistModel.value.trim() };
+    const b = { default_preset: f.preset.value, memory_budget_gib: mem, low_memory: f.lowMem.value, require_ac: f.ac.checked, fast_numerics: f.fast.checked, theme: f.theme.value, prune_uploads_days: prune, assist_provider: f.assistProvider.value, assist_model: f.assistModel.value.trim() };
     if (f.apiKey.value) b.anthropic_api_key = f.apiKey.value;
     return b;
   }
   async function put(b, msg) {
     s = await api.saveSettings(b); app.settings = s; applyTheme(s.theme);
     f.apiKey.value = ""; f.apiKey.placeholder = keyPlaceholder(s);
+    f.lowMem.options[0].textContent = autoLabel(s); f.mem.value = s.memory_budget_gib;
     if (msg) toast(msg, "ok");
     if (app.refreshStatus) await app.refreshStatus(); // provider/key changes show up now, not on the next 5 s poll
   }
@@ -60,7 +71,9 @@ export async function settingsView({ el, app }) {
   } },
     h("h3", {}, "Generation"),
     h("label", { class: "field" }, h("span", { class: "lbl" }, "Default preset"), f.preset),
-    h("label", { class: "field" }, h("span", { class: "lbl" }, "Memory budget (GiB, 6–44)"), f.mem, h("span", { class: "hint" }, "MLX watchdog limit; a change rebuilds the pipeline on the next job. Peak use is ≈11 GiB.")),
+    h("label", { class: "field" }, h("span", { class: "lbl" }, `Memory budget (GiB, ${memMin}–${memMax})`), f.mem, h("span", { class: "hint" }, memHint(s))),
+    h("label", { class: "field" }, h("span", { class: "lbl" }, "Low-memory mode"), f.lowMem,
+      h("span", { class: "hint" }, "Loads the models one at a time so a song fits in ~5.5 GiB; costs a second or two per Quality song. Auto turns it on for Macs with 24 GB or less.")),
     h("label", { class: "check" }, f.ac, "Require AC power before running jobs"),
     h("label", { class: "check" }, f.fast, "Fast numerics"),
     h("span", { class: "hint" }, "Runs both CFG branches in one pass and uses native BF16 attention for synthesis (about 2.5× faster synthesis on M5). Songs differ very slightly from exact mode, so a seed only reproduces a song made in the same mode."),
@@ -94,6 +107,7 @@ export async function settingsView({ el, app }) {
     fill(statusBox, 
       h("dt", {}, "Engine"), h("dd", {}, h("span", { class: `tag ${e.state === "ready" ? "ok" : e.state === "busy" ? "accent" : ""}` }, e.state)),
       h("dt", {}, "Precision"), h("dd", {}, e.precision || "—"), h("dt", {}, "Memory"), h("dd", {}, fmt.gib(e.memory_gib)),
+      h("dt", {}, "Low-memory"), h("dd", {}, e.low_memory === true ? h("span", { class: "tag accent" }, "on") : e.low_memory === false ? "off" : "—"),
       h("dt", {}, "LoRA"), h("dd", {}, e.loras && e.loras.length ? loraLabel(e.loras) : "—"),
       h("dt", {}, "Current job"), h("dd", {}, e.current_job_id ? h("a", { href: "#/queue", class: "mono" }, e.current_job_id.slice(0, 8)) : "—"),
       h("dt", {}, "Queued"), h("dd", {}, q.queued), h("dt", {}, "Version"), h("dd", {}, st.version));

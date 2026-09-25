@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--example", type=Path, default=Path("examples/quickstart.json"))
     parser.add_argument("--seed", type=int)
     parser.add_argument("--memory-budget-gib", type=float, default=config.DEFAULT_MEMORY_BUDGET_GIB)
+    parser.add_argument("--low-memory", choices=config.LOW_MEMORY_MODES, default=config.DEFAULT_LOW_MEMORY,
+                        help="mlx-Yue low-memory mode (auto = on for Macs with 24 GB or less)")
     parser.add_argument("--require-ac", action="store_true")
     parser.add_argument("--exact-numerics", action="store_true",
                         help="disable mlx-Yue fast numerics (bit-reproducible, slower)")
@@ -39,9 +41,10 @@ def main(argv: list[str] | None = None) -> int:
     from yue2_studio.engine import Engine
 
     loras = [(item.partition(":")[0], float(item.partition(":")[2] or 1.0)) for item in args.lora]
+    low_memory = config.resolve_low_memory(args.low_memory, args.memory_budget_gib)
     options = config.resolve_preset(args.preset, args.precision, args.ode_steps,
                                     memory_budget_gib=args.memory_budget_gib, require_ac=args.require_ac,
-                                    fast_numerics=not args.exact_numerics,
+                                    fast_numerics=not args.exact_numerics, low_memory=low_memory,
                                     loras=loras)
     request = json.loads(args.example.read_text())
     if args.seed is not None:
@@ -73,11 +76,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[log] {event['text']}", flush=True)
 
     print(f"[smoke] preset={options.preset} precision={options.precision} ode_steps={options.ode_steps} "
-          f"budget={options.memory_budget_gib} GiB -> {out_dir}", flush=True)
+          f"budget={options.memory_budget_gib} GiB low_memory={options.low_memory} -> {out_dir}",
+          flush=True)
     engine = Engine()
     started = time.perf_counter()
     try:
         summary = engine.create_song(request, out_dir, options=options, on_event=on_event)
+        footprint = engine.memory_footprint()
     finally:
         engine.unload()
     wall = time.perf_counter() - started
@@ -90,7 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         "nar_seconds": round(timing["nar_seconds"], 2), "vae_seconds": round(timing["vae_seconds"], 2),
         "e2e_seconds": round(timing["e2e_seconds"], 2), "wall_seconds": round(wall, 2),
         "load": {k: round(v, 2) for k, v in timing["load"].items() if not k.endswith("events_seconds")},
-        "stages": timing["stages"], "events": dict(counts),
+        "stages": timing["stages"], "events": dict(counts), "low_memory": options.low_memory,
+        "mlx_peak_gib": round(footprint["mlx_peak_bytes"] / 2**30, 2),
     }, indent=2))
     result = json.loads(Path(summary["song_dir"], "result.json").read_text())
     ok = result["status"] == "complete" and Path(summary["audio_path"]).is_file()

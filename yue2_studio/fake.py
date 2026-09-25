@@ -98,6 +98,7 @@ class FakeEngine:
         self.audio_seconds = audio_seconds
         self.state = "cold"
         self.precision: str | None = None
+        self.low_memory: bool | None = None  # like Engine.low_memory: the resident pipeline's mode
         self.loras: list[dict] = []
         self.pipeline: Any | None = None
         self.calls: list[tuple[str, dict]] = []
@@ -109,12 +110,14 @@ class FakeEngine:
     def ensure(self, options: EngineOptions, on_event: Callable[[dict], None] | None = None) -> Any:
         with self._lock:
             self.ensure_calls += 1
-            if self.pipeline is not None and self.precision != options.precision:
+            if self.pipeline is not None and self.pipeline["build_key"] != options.build_key:
                 self.unload()
             if self.pipeline is None:
                 self.state = "loading"
-                self.pipeline = {"precision": options.precision, "on_event": on_event}
+                self.pipeline = {"precision": options.precision, "on_event": on_event,
+                                 "build_key": options.build_key}
                 self.precision = options.precision
+                self.low_memory = options.low_memory
             self.pipeline["on_event"] = on_event
             self.state = "ready"
             return self.pipeline
@@ -123,6 +126,7 @@ class FakeEngine:
         with self._lock:
             self.pipeline = None
             self.precision = None
+            self.low_memory = None
             self.loras = []
             self.state = "cold"
 
@@ -381,7 +385,8 @@ class FakeEngine:
             "sample_rate": SAMPLE_RATE, "seconds": self.audio_seconds,
             "timing": timing, "truncated": {"abc": False, "semantic": False},
             "identity": "fake", "preset": options.preset, "precision": options.precision,
-            "ode_steps": options.ode_steps, "seed": request.get("seed", 831001),
+            "ode_steps": options.ode_steps, "fast_numerics": options.fast_numerics,
+            "low_memory": options.low_memory, "seed": request.get("seed", 831001),
             "loras": loras_to_api(options.loras),
         }
         (out_dir / "summary.json").write_text(json.dumps(summary))

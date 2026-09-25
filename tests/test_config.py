@@ -92,6 +92,52 @@ def test_unknown_preset():
         config.resolve_preset("turbo")
 
 
+@pytest.mark.parametrize(("total", "top", "default"), [
+    (8.0, 6.0, 6.0), (16.0, 12.0, 12.0), (18.0, 14.0, 14.0), (24.0, 20.0, 20.0), (32.0, 28.0, 24.0),
+    (48.0, 44.0, 24.0), (128.0, 124.0, 24.0), (15.9, 11.0, 11.0),
+])
+def test_memory_budget_default_is_capped_to_the_machine(total, top, default):
+    """mlx-Yue's guard rejects budget > total RAM - 4 GiB; the default is min(24, that), floor 6."""
+    assert config.max_memory_budget_gib(total) == top
+    assert config.default_memory_budget_gib(total) == default
+
+
+def test_machine_helpers_default_to_the_pinned_host(machine_ram):
+    machine_ram(16)
+    assert config.max_memory_budget_gib() == 12.0 and config.default_memory_budget_gib() == 12.0
+    assert config.clamp_memory_budget(24) == 12.0
+    assert config.resolve_low_memory("auto", 12.0) is True
+
+
+@pytest.mark.parametrize(("value", "total", "expected"), [
+    (24, 16.0, 12.0), (12, 16.0, 12.0), (8.5, 16.0, 8.5), (3, 16.0, 6.0), (24, 48.0, 24.0), (44, 48.0, 44.0),
+    (60, 48.0, 44.0), ("lots", 16.0, 12.0), (None, 48.0, 24.0), (True, 48.0, 24.0),
+    (float("nan"), 16.0, 12.0),
+])
+def test_clamp_memory_budget(value, total, expected):
+    assert config.clamp_memory_budget(value, total) == expected
+
+
+@pytest.mark.parametrize(("mode", "budget", "total", "expected"), [
+    ("on", 44.0, 64.0, True), ("off", 12.0, 16.0, False),
+    ("auto", 12.0, 16.0, True),  # 16 GB Mac
+    ("auto", 20.0, 24.0, True),  # 24 GB Mac: RAM <= 24 GiB
+    ("auto", 24.0, 32.0, False), ("auto", 24.0, 48.0, False),
+    ("auto", 13.5, 48.0, True), ("auto", 14.0, 48.0, False),  # a small budget on a big Mac
+    ("bogus", 24.0, 48.0, False),  # unknown = auto
+])
+def test_resolve_low_memory(mode, budget, total, expected):
+    assert config.resolve_low_memory(mode, budget, total) is expected
+
+
+def test_low_memory_is_part_of_the_build_key():
+    off = config.resolve_preset("quality")
+    on = config.resolve_preset("quality", low_memory=True)
+    assert off.low_memory is False and on.low_memory is True
+    assert off.build_key != on.build_key
+    assert on.build_key == config.resolve_preset("quality", low_memory=True, fast_numerics=False).build_key
+
+
 def test_build_key_ignores_ode_steps():
     a = config.resolve_preset("fast", ode_steps=8)
     b = config.resolve_preset("fast", ode_steps=32)

@@ -259,7 +259,8 @@ def test_delete_removes_group_when_last_member(store):
 def test_settings_defaults_and_partial_update(store):
     assert store.get_settings() == {"default_preset": "quality",
                                     "memory_budget_gib": config.DEFAULT_MEMORY_BUDGET_GIB,
-                                    "require_ac": False, "fast_numerics": True, "theme": "system",
+                                    "require_ac": False, "fast_numerics": True, "low_memory": "auto",
+                                    "theme": "system",
                                     "prune_uploads_days": None,
                                     "assist_provider": "auto", "assist_model": "", "anthropic_api_key": ""}
     updated = store.update_settings({"theme": "dark", "memory_budget_gib": 20})
@@ -277,6 +278,43 @@ def test_settings_defaults_and_partial_update(store):
     for bad in (0, 366, -1, 2.5, "7d", True):
         with pytest.raises(ValidationFailure):
             store.update_settings({"prune_uploads_days": bad})
+
+
+def test_stored_budget_above_the_machine_limit_is_clamped(store, machine_ram):
+    """A 24 GiB budget saved on a big Mac (or by the old uncapped default) is lowered on a 16 GB Mac."""
+    store.update_settings({"memory_budget_gib": 24, "theme": "dark"})
+    machine_ram(16)
+    settings = store.get_settings()
+    assert settings["memory_budget_gib"] == 12.0 and settings["theme"] == "dark"  # nothing else reset
+    job = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
+    assert job.options(settings).memory_budget_gib == 12.0
+    # use-time clamp also covers settings dicts that never went through get_settings
+    assert job.options({"memory_budget_gib": 24}).memory_budget_gib == 12.0
+    assert jobs.resolve_options(jobs.parse(jobs.SubmitRequest, {"kind": "create", "params": BASE}),
+                                {"memory_budget_gib": 40}).memory_budget_gib == 12.0
+    with pytest.raises(ValidationFailure, match="at most 12 GiB"):
+        store.update_settings({"memory_budget_gib": 13})
+    assert store.update_settings({"memory_budget_gib": 12})["memory_budget_gib"] == 12.0
+
+
+@pytest.mark.parametrize(("ram", "settings", "expected"), [
+    (16, {}, True), (16, {"low_memory": "off"}, False), (24, {"low_memory": "auto"}, True),
+    (48, {}, False), (48, {"low_memory": "on"}, True), (48, {"memory_budget_gib": 12}, True),
+    (48, {"memory_budget_gib": 12, "low_memory": "off"}, False), (48, {"memory_budget_gib": 14}, False),
+])
+def test_low_memory_resolves_into_engine_options(store, machine_ram, ram, settings, expected):
+    machine_ram(ram)
+    job = jobs.submit(store, {"kind": "create", "params": BASE}).jobs[0]
+    assert job.options({**jobs.DEFAULT_SETTINGS, "memory_budget_gib": 24, **settings}).low_memory is expected
+    req = jobs.parse(jobs.SubmitRequest, {"kind": "create", "params": BASE})
+    assert jobs.resolve_options(req, {"memory_budget_gib": 24, **settings}).low_memory is expected
+
+
+def test_memory_info(machine_ram):
+    machine_ram(16)
+    assert jobs.memory_info({"memory_budget_gib": 24, "low_memory": "auto"}) == {
+        "machine_ram_gib": 16.0, "min_memory_budget_gib": 6.0, "max_memory_budget_gib": 12.0,
+        "memory_budget_gib": 12.0, "low_memory": "auto", "low_memory_effective": True}
 
 
 def test_upload_counts_one_query_over_cover_and_hum_jobs(store):

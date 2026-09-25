@@ -334,11 +334,15 @@ class SubmitRequest(_Params):
 
 class SettingsModel(_Params):
     default_preset: Literal["quality", "fast", "custom"] = "quality"
-    memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB, ge=6, le=44)
+    # Upper bound is the machine's (total RAM - 4 GiB, ``config.max_memory_budget_gib``), checked below.
+    memory_budget_gib: float = Field(default=config.DEFAULT_MEMORY_BUDGET_GIB,
+                                     ge=config.MIN_MEMORY_BUDGET_GIB)
     require_ac: bool = config.DEFAULT_REQUIRE_AC
     # mlx-Yue fast numerics (batched CFG, native BF16 acoustic attention): much faster on M5, but a
     # seed only reproduces a song made in the same mode.
     fast_numerics: bool = config.DEFAULT_FAST_NUMERICS
+    # mlx-Yue low-memory mode; ``auto`` resolves per machine (``config.resolve_low_memory``).
+    low_memory: Literal["auto", "on", "off"] = config.DEFAULT_LOW_MEMORY
     theme: Literal["system", "light", "dark"] = "system"
     # Auto-delete uploads no job references after this many days; None = never.
     prune_uploads_days: int | None = Field(default=None, ge=1, le=365)
@@ -347,6 +351,14 @@ class SettingsModel(_Params):
     assist_provider: Literal["auto", "cli", "api", "off"] = "auto"
     assist_model: str = Field(default="", max_length=80)
     anthropic_api_key: str = Field(default="", max_length=200)
+
+    @field_validator("memory_budget_gib")
+    @classmethod
+    def _budget_fits(cls, v):
+        top = config.max_memory_budget_gib()
+        if v > top:
+            raise ValueError(f"must be at most {top:g} GiB on this Mac (total RAM minus 4 GiB for macOS)")
+        return v
 
     @field_validator("prune_uploads_days", mode="before")
     @classmethod
@@ -362,6 +374,35 @@ class SettingsModel(_Params):
 
 
 DEFAULT_SETTINGS = SettingsModel().model_dump()
+
+
+def engine_settings(settings: dict) -> dict:
+    """The ``resolve_preset`` keyword arguments a settings dict implies, resolved for this machine.
+
+    The memory budget is clamped to ``[6, total RAM - 4]`` (a stored value may predate the cap) and
+    ``low_memory`` (auto / on / off) becomes the effective flag for that budget.
+    """
+    budget = config.clamp_memory_budget(settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB))
+    mode = settings.get("low_memory", config.DEFAULT_LOW_MEMORY)
+    return {
+        "memory_budget_gib": budget,
+        "require_ac": settings.get("require_ac", config.DEFAULT_REQUIRE_AC),
+        "fast_numerics": settings.get("fast_numerics", config.DEFAULT_FAST_NUMERICS),
+        "low_memory": config.resolve_low_memory(mode, budget),
+    }
+
+
+def memory_info(settings: dict) -> dict:
+    """Machine RAM, the budget range and the low-memory resolution (``status.memory`` / ``Settings``)."""
+    resolved = engine_settings(settings)
+    return {
+        "machine_ram_gib": round(config.machine_ram_gib(), 1),
+        "min_memory_budget_gib": float(config.MIN_MEMORY_BUDGET_GIB),
+        "max_memory_budget_gib": config.max_memory_budget_gib(),
+        "memory_budget_gib": resolved["memory_budget_gib"],
+        "low_memory": settings.get("low_memory", config.DEFAULT_LOW_MEMORY),
+        "low_memory_effective": resolved["low_memory"],
+    }
 
 
 # -- projects / tracks / takes request bodies (partial patches use ``model_fields_set``) --------
@@ -561,13 +602,8 @@ class Job:
 
     def options(self, settings: dict | None = None) -> config.EngineOptions:
         settings = settings or DEFAULT_SETTINGS
-        return config.resolve_preset(
-            self.preset, self.precision, self.ode_steps,
-            memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
-            require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC),
-            loras=self.loras,
-            fast_numerics=settings.get("fast_numerics", config.DEFAULT_FAST_NUMERICS),
-        )
+        return config.resolve_preset(self.preset, self.precision, self.ode_steps, loras=self.loras,
+                                     **engine_settings(settings))
 
     def to_api(self) -> dict:
         return {
@@ -1226,6 +1262,9 @@ class JobStore:
             rows = self._conn.execute("SELECT key, value FROM settings").fetchall()
         stored = {r["key"]: json.loads(r["value"]) for r in rows}
         merged = {**DEFAULT_SETTINGS, **{k: v for k, v in stored.items() if k in DEFAULT_SETTINGS}}
+        # A budget saved before the machine cap existed (24 GiB everywhere) or on a bigger Mac is lowered
+        # to what this Mac's guard accepts instead of failing validation (which would reset everything).
+        merged["memory_budget_gib"] = config.clamp_memory_budget(merged["memory_budget_gib"])
         try:
             return SettingsModel.model_validate(merged).model_dump()
         except ValidationError:
@@ -1275,12 +1314,7 @@ def resolve_options(req: SubmitRequest, settings: dict, *, default_preset: str |
         if unknown:
             raise ValidationFailure(f"unknown or unusable LoRA adapter {unknown[0]!r}")
     try:
-        return config.resolve_preset(
-            preset, precision, ode_steps,
-            memory_budget_gib=settings.get("memory_budget_gib", config.DEFAULT_MEMORY_BUDGET_GIB),
-            require_ac=settings.get("require_ac", config.DEFAULT_REQUIRE_AC), loras=loras,
-            fast_numerics=settings.get("fast_numerics", config.DEFAULT_FAST_NUMERICS),
-        )
+        return config.resolve_preset(preset, precision, ode_steps, loras=loras, **engine_settings(settings))
     except ValueError as error:
         raise ValidationFailure(str(error)) from None
 

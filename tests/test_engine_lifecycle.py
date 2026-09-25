@@ -21,10 +21,12 @@ class FakePipeline:
 
     instances: list = []
 
-    def __init__(self, model_dir, vae_dir, *, precision, memory_budget_gib, require_ac, progress, on_event):
+    def __init__(self, model_dir, vae_dir, *, precision, memory_budget_gib, require_ac, progress, on_event,
+                 **extra):
         from yue2.protocol import SongRequest
 
         self.precision = precision
+        self.extra = extra  # kwargs beyond the ones every mlx-Yue accepts (low_memory)
         self.on_event = on_event
         self.generation_config = None
         self.stage_timings = {}
@@ -286,6 +288,121 @@ def test_fast_numerics_is_applied_per_job_without_rebuild(engine, tmp_path, fast
         engine.create_song(REQUEST, tmp_path / "job",
                            options=config.resolve_preset("quality", fast_numerics=fast))
     assert engine.pipeline is pipe and pipe.fast_numerics is fast
+
+
+def test_low_memory_toggle_rebuilds_and_is_passed_only_when_on(engine):
+    """``low_memory`` is fixed at construction (build_key); the kwarg is omitted when off (old mlx-Yue)."""
+    engine.ensure(config.resolve_preset("quality"))
+    first = engine.pipeline
+    assert first.extra == {} and engine.low_memory is False
+    engine.ensure(config.resolve_preset("quality", fast_numerics=False))  # not a build field
+    assert engine.pipeline is first
+    engine.ensure(config.resolve_preset("quality", low_memory=True))
+    second = engine.pipeline
+    assert first.closed and second is not first
+    assert second.extra == {"low_memory": True} and engine.low_memory is True
+    engine.ensure(config.resolve_preset("quality", low_memory=True))
+    assert engine.pipeline is second
+    engine.ensure(config.resolve_preset("quality"))
+    assert second.closed and engine.pipeline.extra == {} and engine.low_memory is False
+    engine.unload()
+    assert engine.low_memory is None
+
+
+def test_low_memory_with_an_old_mlx_yue_fails_clearly(monkeypatch):
+    """The real factory checks ``YuE2Pipeline`` for the kwarg before building (no cryptic TypeError)."""
+    from yue2_studio import engine as engine_mod
+
+    class OldPipeline:
+        def __init__(self, model_dir, vae_dir, *, precision="bf16", memory_budget_gib=16, require_ac=False,
+                     progress=True):
+            pass
+
+    monkeypatch.setattr(engine_mod, "YuE2Pipeline", OldPipeline)
+    real = Engine(converted_dir="/nonexistent/converted", vae_dir="/nonexistent/vae")
+    with pytest.raises(RuntimeError, match="Low-memory mode needs a newer mlx-Yue"):
+        real.ensure(config.resolve_preset("quality", low_memory=True))
+    assert real.state == "cold" and real.pipeline is None
+
+
+class _Info:
+    def __init__(self, name, parts):
+        self.name, self.parts = name, set(parts)
+
+
+def _bare_studio_pipeline(monkeypatch, upstream):
+    """A ``StudioPipeline`` without upstream ``__init__`` whose ``super()._load_model`` is ``upstream``."""
+    from lyra.pipeline import YuE2Pipeline
+
+    from yue2_studio.engine import StudioPipeline
+
+    pipe = StudioPipeline.__new__(StudioPipeline)
+    pipe.on_event, pipe.stage_timings, pipe.precision = None, {}, "bf16"
+    pipe._ar = pipe._bf16_ar = pipe._nar = None
+    pipe.loras, pipe.hum_adapter = [(_Info("both", ["ar", "nar"]), 1.0)], None
+    pipe._lora_key = (("sha", 1.0),)
+    pipe._check_execution = lambda: None
+    monkeypatch.setattr(YuE2Pipeline, "_load_model", upstream)
+    return pipe
+
+
+def test_load_model_forwards_for_conditioning_and_merges_every_reload(monkeypatch):
+    """Low-memory staging: conditioning-only AR, then the NAR, then a reload next job; each merged once."""
+    from yue2_studio import engine as engine_mod
+
+    class Model:
+        def __init__(self, name):
+            self.name = name
+
+    calls, merges = [], []
+
+    def upstream(self, for_nar=False, for_conditioning=False):
+        calls.append((for_nar, for_conditioning))
+        if for_conditioning:  # contract: loads self._bf16_ar without lm_head; only one of AR / NAR resident
+            self._ar, self._nar = None, None
+            if self._bf16_ar is None:
+                self._bf16_ar = Model(f"cond{len(calls)}")
+            return self._bf16_ar
+        if for_nar:
+            self._bf16_ar = None
+            if self._nar is None:
+                self._nar = Model(f"nar{len(calls)}")
+            return self._nar
+        self._bf16_ar = self._nar = None
+        if self._ar is None:
+            self._ar = Model(f"ar{len(calls)}")
+        return self._ar
+
+    def apply_adapter(model, info, *, part, scale):
+        merges.append((model.name, part))
+        return 1
+
+    monkeypatch.setattr(engine_mod.lora_mod, "apply_adapter", apply_adapter)
+    pipe = _bare_studio_pipeline(monkeypatch, upstream)
+    cond = pipe._load_model(for_conditioning=True)
+    assert calls == [(False, True)] and cond is pipe._bf16_ar and merges == [("cond1", "ar")]
+    nar = pipe._load_model(for_nar=True)
+    assert nar is pipe._nar and merges[-1] == ("nar2", "nar") and len(merges) == 2
+    assert pipe._load_model(for_nar=True) is nar and len(merges) == 2  # resident + tagged: no re-merge
+    pipe._load_model()  # next job's AR: a fresh object, merged again
+    assert merges[-1] == ("ar4", "ar") and len(merges) == 3
+    pipe._load_model(for_conditioning=True)
+    assert merges[-1] == ("cond5", "ar") and calls[-1] == (False, True)
+
+
+def test_load_model_without_kwargs_matches_old_upstream_signature(monkeypatch):
+    """With the old mlx-Yue (``_load_model(for_nar=False)`` only) nothing extra is forwarded."""
+    from yue2_studio import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod.lora_mod, "apply_adapter", lambda *a, **k: 1)
+
+    def upstream(self, for_nar=False):  # the installed signature: a stray kwarg would raise TypeError
+        self._nar = object.__new__(type("Nar", (), {}))
+        return self._nar
+
+    pipe = _bare_studio_pipeline(monkeypatch, upstream)
+    assert pipe._load_model(for_nar=True) is pipe._nar
+    assert pipe._nar._studio_loras == pipe._lora_key
 
 
 @pytest.mark.skipif(not (config.CONVERTED_DIR / "qwen.tiktoken").is_file(), reason="models/converted missing")

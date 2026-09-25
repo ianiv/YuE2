@@ -12,7 +12,7 @@ internet for score rendering) and the optional soundfont download for the score 
 
 | | |
 |---|---|
-| Hardware | Apple Silicon Mac. Peak use is ~11 GiB of unified memory; the default memory budget is 24 GiB, so **48 GB is recommended** (a 24–32 GB machine works with the budget lowered in Settings, see [Troubleshooting](#troubleshooting)). Timings below are from an M5 Max / 48 GB. |
+| Hardware | Apple Silicon Mac with **16 GB or more**. A 3-minute song peaks at ~10 GiB of unified memory normally and ~5.3 GiB in low-memory mode, which Settings turns on automatically on Macs with 24 GB or less. The memory budget defaults to 24 GiB capped at total RAM − 4 GiB (12 GiB on a 16 GB Mac). 32 GB+ runs everything at full speed; timings below are from an M5 Max / 48 GB. |
 | macOS | **14.2 or newer** on M1–M4 chips; **26.2 or newer on M5** chips (mlx-Yue checks the chip via `mx.device_info()` and refuses older versions). Native arm64 Python only — not Intel or Rosetta. |
 | Python | 3.12 (fetched automatically by `uv`; the project is pinned to `>=3.12,<3.13`). |
 | Tools | [`uv`](https://docs.astral.sh/uv/) and `ffmpeg` on `PATH` (`brew install uv ffmpeg`). ffmpeg is needed for MP3 export, upload probing and covers. |
@@ -118,10 +118,20 @@ used. **Melody** picks what happens to the transcription:
 Cover is disabled (and the API answers 409) until the transcription models and ffmpeg are present;
 `#/settings` and `GET /api/status` say what is missing.
 
-**Settings** (`#/settings`) — default preset, memory budget (6–44 GiB; mlx-Yue's guard rejects ≤ 5 GiB), require-AC-power,
+**Settings** (`#/settings`) — default preset, memory budget (6 GiB up to total RAM − 4 GiB, e.g. 6–12 on a
+16 GB Mac and 6–44 on 48 GB; default 24 capped to that), low-memory mode (Auto / On / Off, below), require-AC-power,
 fast numerics (on by default, see [Measured timings](#measured-timings-m5-max-48-gb-macos-27-memory-budget-24-gib)), theme,
-Claude assist (below), plus a live engine panel (state, precision, memory, merged LoRAs, current job,
-model paths, the LoRA adapters found in `models/loras/` and why any of them is unusable).
+Claude assist (below), plus a live engine panel (state, precision, memory, low-memory mode, merged LoRAs,
+current job, model paths, the LoRA adapters found in `models/loras/` and why any of them is unusable).
+
+**Low-memory mode** loads the models one at a time: planning and song generation use the AR as usual,
+then synthesis precomputes the acoustic conditioning with the BF16 AR, releases it and only then loads
+the acoustic model, and decoding releases both, so a 3-minute song peaks at 5.3 GiB instead of 10.2 GiB
+(Fast preset, M5 Max, same wall time) with bit-identical audio. It also relaxes mlx-Yue's swap /
+available-memory / pressure guard. The cost is reloading the
+models on every job (about 0.2–2.5 s per Quality song), so *Auto* (the default) turns it on only for Macs
+with 24 GB or less, or when the memory budget is below 14 GiB; *On* / *Off* force it. Changing it rebuilds
+the pipeline on the next job, and each song's `summary.json` records `low_memory`.
 
 ### Claude assist
 
@@ -288,6 +298,9 @@ end-to-end. Model verification + first load adds ~3–5 s to the first job of a 
 uv run python scripts/smoke.py --preset quality --example examples/full-song.json   # add --exact-numerics for exact mode
 ```
 
+(`--low-memory on|off|auto` picks the low-memory mode; the script prints the run's `mlx_peak_gib` and
+`load` timings.)
+
 ## Command line
 
 ```
@@ -373,13 +386,26 @@ timings), `docs/PLAN.md` (design), `docs/API.md` (contract).
   set before MLX initialises. `yue2_studio.config` sets it on import, and every entry point imports
   `config` first; if you embed the package elsewhere, import `yue2_studio.config` before `mlx`.
 - **`MemoryError: Process footprint exceeds budget` / job fails then the engine shows `cold`.**
-  The pipeline's memory watchdog tripped the configured budget (Settings → Memory budget, default
-  24 GiB, settable 6–44; the guard requires 5 GiB < budget ≤ total RAM − 4 GiB, so use ≤ 20 on a
-  24 GB machine). Peak use
-  is ~11 GiB for generation; covers release the song models before loading SheetSage2 + MERT
-  (~3 GiB) and reload them lazily afterwards. After
-  any non-cancellation failure the pipeline is discarded (the guard latches the error) and the next
-  job rebuilds it automatically.
+  The pipeline's memory watchdog tripped the configured budget (Settings → Memory budget). Peak use
+  is ~10 GiB for generation (~5.3 GiB in low-memory mode); covers release the song models
+  before loading SheetSage2 + MERT (~3 GiB) and reload them lazily afterwards. On a 16 GB Mac the
+  budget tops out at 12 GiB, so keep low-memory mode on (Auto does that). After any non-cancellation
+  failure the pipeline is discarded (the guard latches the error) and the next job rebuilds it
+  automatically.
+- **"Memory budget must exceed 5 GiB and leave 4 GiB OS headroom" / the budget changed by itself.**
+  mlx-Yue's guard requires 5 GiB < budget ≤ total RAM − 4 GiB. The default is 24 GiB capped to that
+  (20 on a 24 GB Mac, 12 on 16 GB) and Settings only accepts values up to the cap; a larger budget saved
+  earlier (the old default was 24 everywhere) or on a bigger Mac is lowered to the cap when read, and the
+  field shows the lowered value. Macs with less than 10 GB of RAM cannot satisfy the 6 GiB floor.
+- **`Stopping GPU workload after new swapping` / `Less than 2 GiB of available system memory remains`
+  / `System memory pressure is not normal`.** The guard stops a job as soon as macOS starts swapping
+  or runs short of free memory. On 16–24 GB Macs turn low-memory mode on (Auto does it), which also
+  relaxes the swap and available-memory thresholds, and close memory-hungry apps (browsers, Xcode,
+  other ML tools) before long batches. If it still trips with low-memory mode on, lower the memory
+  budget or run the Fast preset (8-bit AR).
+- **"Low-memory mode needs a newer mlx-Yue than the one installed".** Low-memory mode is on (Auto on a
+  ≤ 24 GB Mac) but the installed mlx-Yue predates it: run `uv sync` after updating the studio, or set
+  Low-memory mode to Off.
 - **`AC power disconnected` failures.** With `require_ac` on, the guard aborts the job when the Mac
   leaves mains power. It is off by default; long batches on battery are simply slow.
 - **`503 engine_unavailable` / models missing.** `GET /api/status` → `models.present=false`. Run

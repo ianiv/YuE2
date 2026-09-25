@@ -240,7 +240,9 @@ and immediately before `done` with the terminal status.
 ```json
 {
   "engine":  {"state": "ready", "precision": "bf16", "memory_gib": 11.2, "current_job_id": null,
-              "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}]},
+              "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}], "low_memory": false},
+  "memory":  {"machine_ram_gib": 48.0, "min_memory_budget_gib": 6.0, "max_memory_budget_gib": 44.0,
+              "memory_budget_gib": 24.0, "low_memory": "auto", "low_memory_effective": false},
   "queue":   {"queued": 2, "running": null},
   "presets": [
     {"name": "quality", "label": "Quality", "precision": "bf16", "ode_steps": 32, "description": "BF16 AR, 32 ODE steps"},
@@ -264,6 +266,12 @@ memory sampled by the worker at stage boundaries, so it lags slightly). `queue.r
 `models.precisions` lists the AR weight files present; `fake` is true under `--fake` (then `models.present` and
 `cover.available` are reported true so jobs can be submitted). `engine.loras` is the stack merged into the resident
 pipeline (`[]` when cold or none); `loras` rescans `models/loras/` on every call (header reads only).
+`engine.low_memory` is whether the *resident* pipeline was built in low-memory mode (`null` when cold); it follows
+a settings change at the next job's rebuild. `memory` describes this Mac and the settings resolved for it:
+`machine_ram_gib` total RAM, `min_memory_budget_gib` / `max_memory_budget_gib` the accepted budget range
+(6 .. ⌊total RAM − 4⌋), `memory_budget_gib` the effective (clamped) budget, `low_memory` the setting
+(`auto|on|off`) and `low_memory_effective` what jobs will use (`auto` = on when total RAM ≤ 24 GiB or the budget is
+below 14 GiB).
 
 `assist` says whether "Ask Claude" can run: `provider ∈ cli|api|null` is what a request would use right now
 (`settings.assist_provider` resolved against what is installed: `auto` = the `claude` CLI when on PATH, else the
@@ -274,10 +282,14 @@ PATH`, `no API key: add one in Settings or set ANTHROPIC_API_KEY`, `assist is tu
 
 ### Settings
 
-`{"default_preset": "quality", "memory_budget_gib": 24, "require_ac": false, "fast_numerics": true, "theme": "system", "prune_uploads_days": null,
-"assist_provider": "auto", "assist_model": "", "has_api_key": false}`
-(`theme ∈ system|light|dark`, `memory_budget_gib` number 6..44 — mlx-Yue's guard rejects budgets ≤ 5 GiB and requires
-total RAM − 4 GiB headroom — returned as a float, e.g. `24.0`; `prune_uploads_days` integer 1..365 or `null` = off:
+`{"default_preset": "quality", "memory_budget_gib": 24.0, "require_ac": false, "fast_numerics": true, "low_memory": "auto",
+"theme": "system", "prune_uploads_days": null, "assist_provider": "auto", "assist_model": "", "has_api_key": false,
+"machine_ram_gib": 48.0, "min_memory_budget_gib": 6.0, "max_memory_budget_gib": 44.0, "low_memory_effective": false}`
+(`theme ∈ system|light|dark`, `memory_budget_gib` number from 6 to `max_memory_budget_gib` = ⌊total RAM − 4⌋ — mlx-Yue's
+guard rejects budgets ≤ 5 GiB and requires 4 GiB of OS headroom — returned as a float, e.g. `24.0`; the default is
+`min(24, max_memory_budget_gib)` (12 on a 16 GB Mac), a `PUT` above the cap is a 400 (`must be at most 12 GiB on this
+Mac …`) and a larger value stored earlier (the old default was 24 everywhere, or the data dir came from a bigger Mac)
+is returned — and used by jobs — clamped to the cap; `prune_uploads_days` integer 1..365 or `null` = off:
 uploads no job references and older than that are deleted at server startup and after every job finishes, exactly
 as `POST /api/uploads/prune {"unused": true, "older_than_days": N}` would). `PUT` accepts any
 subset, ignores unknown keys, and returns the full object; a rejected patch (400) changes nothing.
@@ -285,6 +297,9 @@ subset, ignores unknown keys, and returns the full object; a rejected patch (400
 | field | type | notes |
 |-------|------|-------|
 | `fast_numerics` | bool | default `true`. mlx-Yue's fast numerics for every job type: both CFG branches share one weight pass per AR token, and acoustic synthesis uses native BF16 attention instead of FP32-promoted attention (≈2.5× faster synthesis on M5; M1–M4 already skip the promotion). Numerically equivalent but not bit-identical, so a seed reproduces a song only in the mode it was made in (recorded as `fast_numerics` in `summary.json` and in `song/config.json`). Never rebuilds the pipeline |
+| `low_memory` | enum(auto\|on\|off) | default `auto`. mlx-Yue low-memory mode: synthesis precomputes the acoustic conditioning with the BF16 AR, releases it, then loads the NAR, so only one of AR / NAR is resident (and decoding releases both: ~5.3 GiB peak instead of ~10 GiB for a 3-minute song; bit-identical audio), and the guard's swap / available-memory / pressure thresholds are relaxed. Models reload every job (≈0.2–2.5 s per Quality song). `auto` = on when total RAM ≤ 24 GiB or the effective budget is below 14 GiB. A change of the *effective* value rebuilds the pipeline on the next job; recorded as `low_memory` in `summary.json` |
+| `low_memory_effective` | bool | **read-only**: what `low_memory` resolves to on this Mac with the saved budget |
+| `machine_ram_gib`, `min_memory_budget_gib`, `max_memory_budget_gib` | float | **read-only**: total RAM and the accepted `memory_budget_gib` range on this Mac (same as `status.memory`) |
 | `assist_provider` | enum(auto\|cli\|api\|off) | `auto` (default) = `claude` CLI if installed, else the API when a key is set |
 | `assist_model` | str | ≤ 80 chars, stripped; `""` = provider default (CLI: its own default; API: `claude-sonnet-5`). The API provider forces a `tool_use`, which `claude-fable-5-1` / the Mythos models reject — the API's 400 then surfaces as-is in a 502 `assist_failed` |
 | `anthropic_api_key` | str | **write-only**, ≤ 200 chars, stripped; stored in plain text in `data/app.db`. `PUT` semantics: key absent → unchanged, `""` → cleared, non-empty → saved. Never present in a response |
@@ -648,12 +663,18 @@ class Engine(Protocol):
     def memory_footprint(self) -> dict:   # bytes: rss_bytes, system_available_bytes, mlx_active_bytes,
                                           # mlx_cache_bytes, mlx_peak_bytes (worker converts to GiB)
     def unload(self) -> None              # close pipeline, release GPU guard; state -> cold
+    low_memory: bool | None               # resident pipeline built in low-memory mode (None when cold)
 ```
 
 `EngineOptions` (`yue2_studio.config`): frozen dataclass `{precision, ode_steps, memory_budget_gib, require_ac,
-preset, loras, fast_numerics}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *,
-memory_budget_gib, require_ac, loras=None, fast_numerics=True)`. `loras` is `((name, scale), …)`; neither it nor
-`fast_numerics` (set on the resident pipeline at the start of every job) changes `build_key`. The real engine resolves
+preset, loras, fast_numerics, low_memory}` produced by `config.resolve_preset(name, precision=None, ode_steps=None, *,
+memory_budget_gib, require_ac, loras=None, fast_numerics=True, low_memory=False)`; the worker builds it from the
+settings with `jobs.engine_settings` (budget clamped to this Mac, `low_memory` resolved from auto/on/off to a bool).
+`loras` is `((name, scale), …)`; neither it nor `fast_numerics` (set on the resident pipeline at the start of every
+job) changes `build_key = (precision, memory_budget_gib, require_ac, low_memory)`. `low_memory=True` is passed to
+`StudioPipeline(…, low_memory=True)` (the kwarg is omitted when off so an mlx-Yue without it still works); upstream
+`synthesize` then stages the models itself, and the hum path (`hum_nar.synthesize_hum`) does the same through
+`pipe.acoustic_conditioning(chunks)` before loading the NAR. The real engine resolves
 each name in `models/loras/` (`yue2_studio.lora.find_adapter`) before touching the GPU, then
 `StudioPipeline.set_loras` merges the stack into the AR / NAR weights as they load (a different stack drops the
 resident models first; they reload from the memory-mapped files). Merges show up as `"Merging LoRA into … model"`
@@ -690,7 +711,7 @@ The HTTP routes therefore map `audio.flac` → `song/audio.flac`, `score.abc` �
             "transcription_seconds": 4.1},
  "truncated": {"abc": false, "semantic": true},
  "identity": "<sha256>", "preset": "fast", "precision": "8bit", "ode_steps": 8, "fast_numerics": true,
- "seed": 12300, "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}],
+ "low_memory": false, "seed": 12300, "loras": [{"name": "ar_lora_inst_v3abc.bf16", "scale": 1.0}],
  "transcription": {"dir": "...", "task": "melody-full", "seconds": 4.1, "source_audio_sha256": "…", "duration_seconds": 16.0}}
 ```
 

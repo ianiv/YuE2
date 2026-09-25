@@ -406,6 +406,31 @@ def test_merge_into_quantized_linear_requantises(mx, loras_dir):
     assert np.abs(after - expected).max() < 0.05 * scale  # 8-bit affine round trip
 
 
+def test_merge_skips_lm_head_on_a_conditioning_only_ar(mx, loras_dir):
+    """Low-memory mode's conditioning AR has no ``lm_head``: its targets are skipped, the rest merge."""
+    rng = np.random.default_rng(5)
+    tensors = {**ar_tensors(), "lm_head.lora_A": rng.standard_normal((4, 16), dtype=np.float32),
+               "lm_head.lora_B": rng.standard_normal((32, 4), dtype=np.float32)}
+    write_safetensors(loras_dir / "withhead.safetensors", tensors)
+    info = lora.find_adapter(loras_dir, "withhead")
+    assert "lm_head" in info.modules("ar")
+    full, _ = _toy_models(mx)
+    head_before = np.array(full.lm_head.weight.astype(mx.float32))
+    assert lora.apply_adapter(full, info, part="ar") == 15  # 14 backbone linears + lm_head
+    assert not np.allclose(np.array(full.lm_head.weight.astype(mx.float32)), head_before)
+    conditioning, _ = _toy_models(mx)
+    conditioning.pop("lm_head")
+    object.__setattr__(conditioning, "conditioning_only", True)
+    before = np.array(conditioning.model.layers[0].self_attn.q_proj.weight.astype(mx.float32))
+    assert lora.apply_adapter(conditioning, info, part="ar") == 14
+    after = np.array(conditioning.model.layers[0].self_attn.q_proj.weight.astype(mx.float32))
+    np.testing.assert_allclose(after, _expected(before, tensors, "layers.0.self_attn.q_proj", 1.0),
+                               rtol=2e-2, atol=2e-2)
+    head_only = {k: v for k, v in tensors.items() if k.startswith("lm_head.")}
+    write_safetensors(loras_dir / "headonly.safetensors", head_only)
+    assert lora.apply_adapter(conditioning, lora.find_adapter(loras_dir, "headonly"), part="ar") == 0
+
+
 def test_merge_errors(mx, loras_dir, ar_adapter):
     ar, nar = _toy_models(mx)
     info = lora.find_adapter(loras_dir, ar_adapter)

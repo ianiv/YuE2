@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-semantic-tokens", type=int, help="cap the song length in tokens (25/s)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--analyse-only", action="store_true", help="only pitch-track/encode the hum")
+    parser.add_argument("--low-memory", choices=config.LOW_MEMORY_MODES, default=config.DEFAULT_LOW_MEMORY,
+                        help="mlx-Yue low-memory mode (auto = on for Macs with 24 GB or less)")
     args = parser.parse_args(argv)
 
     from yue2_studio import audio, hum
@@ -72,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
 
     lyrics = args.lyrics_file.read_text() if args.lyrics_file else args.lyrics
     loras = [(item.partition(":")[0], float(item.partition(":")[2] or 1.0)) for item in args.lora]
-    options = config.resolve_preset(args.preset, args.precision, args.ode_steps, loras=loras)
+    options = config.resolve_preset(args.preset, args.precision, args.ode_steps, loras=loras,
+                                    low_memory=config.resolve_low_memory(args.low_memory,
+                                                                         config.DEFAULT_MEMORY_BUDGET_GIB))
     hum_options = hum.HumOptions(melody=args.melody, adapter=args.adapter, influence=args.influence,
                                  offset_s=args.offset)
     request = {"style": args.style, "lyrics": lyrics, "seed": args.seed, "id": "hum-smoke"}
@@ -92,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         elif kind == "log":
             print(f"[log] {event['text']}", flush=True)
 
-    print(f"[hum-smoke] {hum_options.to_dict()} preset={options.preset} loras={options.loras} -> {out_dir}")
+    print(f"[hum-smoke] {hum_options.to_dict()} preset={options.preset} loras={options.loras} "
+          f"low_memory={options.low_memory} -> {out_dir}")
     engine = Engine()
     started = time.perf_counter()
     try:

@@ -7,7 +7,8 @@ imported first so ``MLX_ENABLE_TF32=0`` is set before MLX initialises.
 mlx-Yue is never modified; ``StudioPipeline`` subclasses ``YuE2Pipeline`` and replaces its
 ``_status`` progress hook so stage progress is published to a callback instead of stderr, and wraps
 ``_load_model`` so LoRA adapters (``yue2_studio.lora``) are merged into whichever AR / NAR weights
-upstream just loaded.
+upstream just loaded. In low-memory mode (``EngineOptions.low_memory``) upstream stages synthesis so only
+one of the AR / NAR is resident and reloads them every job; the wrapper merges into each reload.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from yue2_studio import config  # isort: skip  (sets MLX_ENABLE_TF32 before mlx 
 
 import gc  # noqa: E402
 import hashlib  # noqa: E402
+import inspect  # noqa: E402
 import json  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
@@ -283,8 +285,16 @@ class StudioPipeline(YuE2Pipeline):
             weights["hum_adapter"] = hum_adapter.identity()
         self.weights = weights
 
-    def _load_model(self, for_nar=False):
-        model = super()._load_model(for_nar=for_nar)
+    def _load_model(self, for_nar=False, **kwargs):
+        """Upstream load, then merge the selected adapters into every resident model not merged yet.
+
+        ``kwargs`` carries ``for_conditioning=True`` (low-memory mode: the BF16 AR loaded only to
+        precompute the NAR conditioning, without ``lm_head``). Merged models are tagged with the stack's
+        key (``_studio_loras``); a reload (low-memory mode drops the models between stages and jobs) is a
+        fresh object without the tag, so it is merged again, and a model already merged is never merged
+        twice (``_bf16_ar`` is ``_ar`` for a resident BF16 AR).
+        """
+        model = super()._load_model(for_nar=for_nar, **kwargs)
         if self._lora_key:
             for part, candidate, label in (("ar", self._ar, f"{self.precision} AR"),
                                            ("ar", self._bf16_ar, "BF16 conditioning"),
@@ -314,6 +324,13 @@ def _clear_gpu() -> None:
     mx.clear_cache()
 
 
+def _require_low_memory_support() -> None:
+    """Fail clearly when the installed mlx-Yue predates ``YuE2Pipeline(low_memory=...)``."""
+    if "low_memory" not in inspect.signature(YuE2Pipeline.__init__).parameters:
+        raise RuntimeError("Low-memory mode needs a newer mlx-Yue than the one installed; run `uv sync` "
+                           "after updating YuE2 Studio, or set Low-memory mode to Off in Settings")
+
+
 class Engine:
     """Owns at most one resident ``StudioPipeline`` and runs song jobs with it.
 
@@ -332,6 +349,7 @@ class Engine:
         self._pipeline_factory = pipeline_factory or StudioPipeline
         self._pipe: StudioPipeline | None = None
         self._build_key: tuple | None = None
+        self._low_memory: bool | None = None
         self._state = "cold"
         self._lock = threading.RLock()
 
@@ -350,6 +368,11 @@ class Engine:
         return None if self._pipe is None else self._pipe.precision
 
     @property
+    def low_memory(self) -> bool | None:
+        """Whether the resident pipeline runs in low-memory mode (``None`` when cold)."""
+        return None if self._pipe is None else self._low_memory
+
+    @property
     def loras(self) -> list[dict]:
         """``[{"name", "scale"}]`` merged into the resident pipeline (empty when none / cold)."""
         pipe = self._pipe
@@ -360,11 +383,11 @@ class Engine:
         return [(lora_mod.find_adapter(self.loras_dir, name), scale) for name, scale in stack]
 
     def ensure(self, options: EngineOptions, on_event: EventCallback | None = None) -> StudioPipeline:
-        """Return a pipeline matching ``options``; build lazily, rebuild when precision/budget/AC change.
+        """Return a pipeline matching ``options``; build lazily, rebuild when a ``build_key`` field changes.
 
-        ``precision`` is fixed at construction in mlx-Yue, so a change closes the resident pipeline
-        (releasing its models and GPU guard) and constructs a new one. ``ode_steps`` is per job and
-        is applied to ``generation_config`` by the callers.
+        ``precision``, the budget, AC and ``low_memory`` are fixed at construction in mlx-Yue, so a change
+        closes the resident pipeline (releasing its models and GPU guard) and constructs a new one.
+        ``ode_steps`` is per job and is applied to ``generation_config`` by the callers.
         """
         with self._lock:
             if self._pipe is not None and self._build_key != options.build_key:
@@ -372,12 +395,18 @@ class Engine:
             if self._pipe is None:
                 self._state = "loading"
                 try:
+                    # Passed only when on, so a stale environment (code pulled, ``uv sync`` not run) still
+                    # works with the mode off and says what to do with it on.
+                    extra = {"low_memory": True} if options.low_memory else {}
+                    if extra and self._pipeline_factory is StudioPipeline:
+                        _require_low_memory_support()
                     self._pipe = self._pipeline_factory(
                         self.converted_dir, self.vae_dir, precision=options.precision,
                         memory_budget_gib=options.memory_budget_gib, require_ac=options.require_ac,
-                        progress=False, on_event=on_event,
+                        progress=False, on_event=on_event, **extra,
                     )
                     self._build_key = options.build_key
+                    self._low_memory = bool(options.low_memory)
                 except BaseException:
                     self._state = "cold"
                     raise
@@ -387,7 +416,7 @@ class Engine:
 
     def unload(self) -> None:
         with self._lock:
-            pipe, self._pipe, self._build_key = self._pipe, None, None
+            pipe, self._pipe, self._build_key, self._low_memory = self._pipe, None, None, None
             self._state = "cold"
             if pipe is not None:
                 try:
@@ -548,6 +577,7 @@ class Engine:
             "precision": options.precision,
             "ode_steps": options.ode_steps,
             "fast_numerics": options.fast_numerics,
+            "low_memory": options.low_memory,
             "seed": native.seed,
             "loras": loras_to_api(options.loras),
         }

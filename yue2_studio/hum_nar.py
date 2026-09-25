@@ -13,7 +13,9 @@ plain conditioned pass (one NAR forward per evaluation), anything else costs two
 
 ``HumNAR.velocity`` is ``lyra.nar.CachedNAR.velocity`` with the two additions; ``solve`` is the
 reference midpoint solver calling the guided velocity. ``synthesize_hum`` re-implements the chunk loop
-of ``lyra.nar.synthesize`` (which hardcodes ``CachedNAR``) with the same cuts and progress mapping.
+of ``lyra.nar.synthesize`` (which hardcodes ``CachedNAR``) with the same cuts and progress mapping, and
+stages the models like ``YuE2Pipeline.synthesize`` in low-memory mode: the NAR conditioning of every chunk
+is precomputed with the BF16 AR (``pipe.acoustic_conditioning``) before the NAR is loaded.
 Only the worker imports this module (it imports ``mlx``).
 """
 
@@ -60,9 +62,13 @@ class HumNAR(CachedNAR):
     """``CachedNAR`` whose hidden state receives the carrier projections; supports hum-channel CFG."""
 
     def __init__(self, model, chunk: Chunk, *, cond: np.ndarray, projections: list[Projection],
-                 inject_layers: list[int], query_chunk_size=None, cancelled=None, attention="exact"):
+                 inject_layers: list[int], query_chunk_size=None, cancelled=None, attention="exact",
+                 conditioning=None):
+        # ``conditioning`` (low-memory mode) replaces CachedNAR's own AR prefill. It is forwarded only
+        # when given, so the call stays valid for an mlx-Yue whose CachedNAR has no such keyword.
+        extra = {} if conditioning is None else {"conditioning": conditioning}
         super().__init__(model, chunk, query_chunk_size=query_chunk_size, cancelled=cancelled,
-                         attention=attention)
+                         attention=attention, **extra)
         cond = np.asarray(cond, dtype=np.float32)
         if cond.shape != (self.nar_length - 2, _LATENT_DIM):
             self.close()
@@ -203,8 +209,6 @@ def synthesize_hum(pipe, semantic, *, cond: np.ndarray, adapter: lora_mod.Adapte
     guarded = pipe.guarded_cancelled(cancelled)
     if guarded():
         raise InterruptedError("Cancelled before acoustic prefill")
-    model = pipe._load_model(for_nar=True)  # merges the user LoRAs and the adapter's NAR half
-    projections = load_hum_projections(adapter, hidden=model.config["hidden_size"])
     steps, context = pipe.generation_config.ode_steps, pipe.generation_config.context
     seed = plan.request.seed
     if noise is None:
@@ -213,15 +217,27 @@ def synthesize_hum(pipe, semantic, *, cond: np.ndarray, adapter: lora_mod.Adapte
         noise = initial_noise(len(semantic.tokens), seed)
     chunks = _chunks_with_supplied_noise(plan.prefix, semantic.tokens, seed, context, noise)
     ranges = chunk_ranges(len(semantic.tokens), len(plan.prefix), int(context))
+    # Low-memory mode: the BF16 AR (with the user's AR LoRAs merged) precomputes each chunk's
+    # conditioning and is released before the NAR loads; ``None`` otherwise (nothing is loaded).
+    # ``getattr``: an mlx-Yue older than the pin (``uv sync`` not run) has no such method.
+    precompute = getattr(pipe, "acoustic_conditioning", None)
+    conds = None if precompute is None else precompute(chunks, cancelled=guarded)
+    if conds is not None:
+        conds = list(conds)
+        if len(conds) != len(chunks):
+            raise RuntimeError("acoustic_conditioning must return one conditioning per chunk")
+    model = pipe._load_model(for_nar=True)  # merges the user LoRAs and the adapter's NAR half
+    projections = load_hum_projections(adapter, hidden=model.config["hidden_size"])
     total_steps = steps * len(chunks)
     output: list[np.ndarray] = []
     with pipe._status("Synthesizing audio", unit="steps") as status:
         for index, (chunk, (start, end)) in enumerate(zip(chunks, ranges, strict=True)):
             if guarded():
                 raise InterruptedError("Cancelled before acoustic prefill")
+            extra = {} if conds is None else {"conditioning": conds[index]}
             engine = HumNAR(model, chunk, cond=cond[start:end], projections=projections,
                             inject_layers=adapter.inject_layers, query_chunk_size=pipe.query_chunk_size,
-                            cancelled=guarded, attention=pipe.nar_attention)
+                            cancelled=guarded, attention=pipe.nar_attention, **extra)
             try:
                 def report(completed, _total, *, _index=index):
                     pipe.check_execution()
@@ -230,7 +246,9 @@ def synthesize_hum(pipe, semantic, *, cond: np.ndarray, adapter: lora_mod.Adapte
                 output.append(engine.solve(steps, guarded, report, guidance=influence))
             finally:
                 engine.close()
-    del projections
+                if conds is not None:
+                    conds[index] = None  # a chunk's AR K/V is not needed once it is solved
+    del projections, conds
     mx.clear_cache()
     result = output[0] if len(output) == 1 else np.concatenate(output, axis=0)
     if result.shape != (len(semantic.tokens), _LATENT_DIM) or not np.isfinite(result).all():
