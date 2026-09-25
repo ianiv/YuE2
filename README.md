@@ -8,6 +8,24 @@ Events, a song library, score editing with regeneration, seed variations and aud
 Everything runs on your Mac; nothing leaves it except loading abcjs from cdnjs (the UI needs
 internet for score rendering) and the optional soundfont download for the score preview (see below).
 
+![YuE2 Studio: the Create page with three variations generating](docs/images/create.png)
+
+| | |
+|---|---|
+| ![Song page with the planned score rendered](docs/images/song-score.png) | ![Queue with the score streaming in while it is planned](docs/images/queue.png) |
+| **Song page** — play the song, read and edit its planned score, regenerate | **Queue** — live progress; the score streams in as it is planned |
+| ![Library of finished songs](docs/images/library.png) | ![A project with rated takes and a chosen take](docs/images/project.png) |
+| **Library** — every song, with filters, downloads and variation groups | **Projects** — tracklists, rated takes, ⇧ Quality, album export |
+| ![Hum to song](docs/images/hum.png) | ![The studio at phone width](docs/images/mobile.png) |
+| **Hum to song** — record a melody and grow a song around it | Works at phone width, in light and dark themes |
+
+**Documentation:** the [user guide](docs/README.md) walks through every page with screenshots —
+[getting started](docs/getting-started.md), [creating songs](docs/creating-songs.md),
+[queue, library and songs](docs/library-and-songs.md), [covers](docs/covers.md),
+[hum to song](docs/hum-to-song.md), [projects](docs/projects.md), [Ask Claude](docs/ask-claude.md),
+[LoRA adapters](docs/lora-adapters.md), [settings](docs/settings.md) and
+[troubleshooting](docs/troubleshooting.md).
+
 ## Requirements
 
 | | |
@@ -42,6 +60,9 @@ The server starts instantly; the models are loaded lazily by the first job (a fe
 second, they are memory-mapped) and stay resident until the precision changes or a job fails.
 
 ## Using the studio
+
+This section is the reference summary; the [user guide](docs/README.md) covers each page in more detail,
+with screenshots.
 
 The UI is a single page with hash routes; every view works at phone width and follows the system
 light/dark theme (overridable in Settings). The header reads **Generate ▾** (Create · Cover · Hum) ·
@@ -88,7 +109,9 @@ group badges; filters by kind, group and text; failed/cancelled jobs listed sepa
 under it), per-stage timing, and the score rendered with abcjs next to an editable ABC
 textarea. **Regenerate from this score** submits a `regenerate`
 job that keeps the lyrics and seed (style editable) and generates audio from your edited score; the
-result links back to its parent. **More variations** pre-fills Create with this song's request.
+result links back to its parent. **More variations** queues N new takes of this song's request (fresh random
+starting seed, same preset and LoRAs; covers keep their transcription, hums their continued score) and
+*Open in Create* pre-fills Create with it.
 Covers additionally show the transcribed score. **▶ Play score (MIDI)** previews the score with
 abcjs' synthesiser — this loads General MIDI soundfonts from the internet
 (`paulrosen.github.io/midi-js-soundfonts`) the first time it is used.
