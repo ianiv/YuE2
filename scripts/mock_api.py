@@ -1,6 +1,7 @@
 """Dev-only mock of docs/API.md so the static UI can be developed without models.
 
     uv run python scripts/mock_api.py --port 8790
+    uv run python scripts/mock_api.py --ram-gib 16   # pretend to be a 16 GB Mac (budget cap, low-memory)
 
 In-memory jobs, scripted SSE progress (streaming ABC text), a silent FLAC (WAV fallback).
 Not part of the product; the real server is yue2_studio.main.
@@ -27,6 +28,7 @@ from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from yue2_studio import config
 from yue2_studio.config import MAX_ODE_STEPS, MIN_ODE_STEPS, PRECISIONS, presets_summary
 
 STATIC = Path(__file__).resolve().parents[1] / "yue2_studio" / "static"
@@ -49,7 +51,9 @@ PROJECTS: dict[str, dict] = {}  # id -> {id, name, description, created_at, upda
 TRACKS: dict[str, dict] = {}  # id -> {id, project_id, name, position, chosen_job_id, created_at}
 TAKES: dict[str, dict] = {}  # job_id -> {track_id, thumb, stars, note, added_at}
 SUBS: dict[str, list[asyncio.Queue]] = {}
-SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False, "theme": "system",
+RAM_GIB = 48.0  # simulated machine RAM (--ram-gib); drives the budget cap and low-memory auto
+SETTINGS = {"default_preset": "quality", "memory_budget_gib": config.default_memory_budget_gib(RAM_GIB),
+            "require_ac": False, "fast_numerics": True, "low_memory": "auto", "theme": "system",
             "prune_uploads_days": None, "assist_provider": "auto", "assist_model": "",
             "anthropic_api_key": ""}
 ASSIST_FIELDS = {
@@ -83,7 +87,8 @@ ASSIST_FIELDS = {
     },
 }
 ASSIST_NOTE = "if it comes out too polished, add `lo-fi, live room`; if the tempo drifts, put the BPM first"
-ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None, "loras": []}
+ENGINE = {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None, "loras": [],
+          "low_memory": None}
 
 
 def _lora(name, **fields):
@@ -236,8 +241,9 @@ def _take_of(job_id: str) -> dict | None:
 
 
 async def run_job(job: dict) -> None:
-    ENGINE.update(state="busy", precision=job["precision"], memory_gib=11.2, current_job_id=job["id"],
-                  loras=job["loras"])
+    low_memory = _memory()["low_memory_effective"]
+    ENGINE.update(state="busy", precision=job["precision"], memory_gib=6.8 if low_memory else 11.2,
+                  current_job_id=job["id"], loras=job["loras"], low_memory=low_memory)
     job.update(status="running", started_at=now())
     await publish(job, event(job["id"], type="status", status="running", message="job started"))
     stages = (
@@ -329,6 +335,7 @@ def status() -> dict:
     running = ENGINE["current_job_id"]
     return {
         "engine": ENGINE,
+        "memory": _memory(),
         "queue": {"queued": sum(j["status"] == "queued" for j in JOBS.values()), "running": running},
         "presets": presets_summary(),
         "loras": {"dir": "/abs/models/loras", "adapters": LORAS},
@@ -926,9 +933,22 @@ async def prune_uploads(req: Request) -> dict:
     return {"deleted": deleted, "skipped": skipped}
 
 
+def _memory() -> dict:
+    """Mirrors ``jobs.memory_info`` for the simulated ``RAM_GIB``."""
+    budget = config.clamp_memory_budget(SETTINGS["memory_budget_gib"], RAM_GIB)
+    return {"machine_ram_gib": RAM_GIB, "min_memory_budget_gib": float(config.MIN_MEMORY_BUDGET_GIB),
+            "max_memory_budget_gib": config.max_memory_budget_gib(RAM_GIB), "memory_budget_gib": budget,
+            "low_memory": SETTINGS["low_memory"],
+            "low_memory_effective": config.resolve_low_memory(SETTINGS["low_memory"], budget, RAM_GIB)}
+
+
 def _public_settings() -> dict:
     public = {k: v for k, v in SETTINGS.items() if k != "anthropic_api_key"}
     public["has_api_key"] = bool(SETTINGS["anthropic_api_key"])
+    memory = _memory()
+    public["memory_budget_gib"] = memory["memory_budget_gib"]
+    public.update({k: memory[k] for k in ("machine_ram_gib", "min_memory_budget_gib", "max_memory_budget_gib",
+                                          "low_memory_effective")})
     return public
 
 
@@ -940,8 +960,13 @@ def get_settings() -> dict:
 @app.put("/api/settings")
 async def put_settings(req: Request):
     body = await req.json()
-    if "memory_budget_gib" in body and not 4 <= float(body["memory_budget_gib"]) <= 44:
-        return err(400, "validation_error", "memory_budget_gib must be 4..44")
+    top = config.max_memory_budget_gib(RAM_GIB)
+    low = config.MIN_MEMORY_BUDGET_GIB
+    if "memory_budget_gib" in body and not low <= float(body["memory_budget_gib"]) <= top:
+        return err(400, "validation_error",
+                   f"memory_budget_gib: must be between {low} and {top:g} GiB on this Mac")
+    if body.get("low_memory") not in (None, *config.LOW_MEMORY_MODES):
+        return err(400, "validation_error", "low_memory must be one of auto, on, off")
     if body.get("assist_provider") not in (None, "auto", "cli", "api", "off"):
         return err(400, "validation_error", "assist_provider must be one of auto, cli, api, off")
     SETTINGS.update({k: v.strip() if isinstance(v, str) else v for k, v in body.items() if k in SETTINGS})
@@ -997,6 +1022,8 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--delay", type=float, default=DELAY)
     ap.add_argument("--no-cover", action="store_true")
+    ap.add_argument("--ram-gib", type=float, default=RAM_GIB, help="simulated machine RAM (e.g. 16)")
     args = ap.parse_args()
-    DELAY, COVER_OK = args.delay, not args.no_cover
+    DELAY, COVER_OK, RAM_GIB = args.delay, not args.no_cover, args.ram_gib
+    SETTINGS["memory_budget_gib"] = config.default_memory_budget_gib(RAM_GIB)
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")

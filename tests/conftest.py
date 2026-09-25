@@ -24,6 +24,25 @@ from yue2_studio.main import create_app
 BASE = {"style": "dreamy indie pop, female vocal", "lyrics": "[verse]\nla la\n[chorus]\nda da", "seed": 42}
 
 
+MACHINE_RAM_GIB = 48.0  # tests see a 48 GB Mac: budget range 6..44, low-memory auto -> off
+
+
+@pytest.fixture(autouse=True)
+def machine_ram(monkeypatch):
+    """Pin ``config.machine_ram_gib`` so budget caps and low-memory ``auto`` do not depend on the host.
+
+    Tests that need another machine call ``machine_ram(16)``. ``config.DEFAULT_MEMORY_BUDGET_GIB`` (and
+    so ``jobs.DEFAULT_SETTINGS``) was computed from the real host at import: 24 on any Mac with 28 GiB+.
+    """
+    from yue2_studio import config
+
+    def pin(total_gib: float) -> None:
+        monkeypatch.setattr(config, "machine_ram_gib", lambda: float(total_gib))
+
+    pin(MACHINE_RAM_GIB)
+    return pin
+
+
 @pytest.fixture
 def fake_probe(monkeypatch):
     """Uploads here are a few junk bytes: pretend ffprobe read them so ``POST /api/upload`` accepts them.

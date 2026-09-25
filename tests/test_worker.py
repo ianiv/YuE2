@@ -488,5 +488,5 @@ def test_worker_cancel_unknown_job_raises(tmp_path):
     with pytest.raises(jobs.NotFound):
         h.worker.cancel("nope")
     assert h.worker.engine_status() == {"state": "cold", "precision": None, "memory_gib": None,
-                                        "current_job_id": None, "loras": []}
+                                        "current_job_id": None, "loras": [], "low_memory": None}
     h.store.close()

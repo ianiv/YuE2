@@ -222,8 +222,10 @@ async def get_status(request: Request):
     store, worker = state.store, state.worker
     counts = store.counts()
     models = config.models_available(state.paths)
+    settings = store.get_settings()
     return {
         "engine": worker.engine_status(),
+        "memory": jobs.memory_info(settings),
         "queue": {"queued": counts.get("queued", 0), "running": store.running_id()},
         "presets": config.presets_summary(),
         "models": {"converted_dir": str(state.paths.converted_dir), "vae_dir": str(state.paths.vae_dir),
@@ -231,7 +233,7 @@ async def get_status(request: Request):
         "cover": _cover_status(request),
         "hum": _hum_status(request),
         "loras": _loras(request),
-        "assist": assist.status(store.get_settings()),
+        "assist": assist.status(settings),
         "ffmpeg": audio.ffmpeg_path() is not None,
         "fake": bool(state.fake),
         "version": __version__,
@@ -244,11 +246,18 @@ async def get_loras(request: Request):
     return _loras(request)
 
 
+_SETTINGS_MEMORY_FIELDS = ("machine_ram_gib", "min_memory_budget_gib", "max_memory_budget_gib",
+                           "low_memory_effective")
+
+
 def _public_settings(settings: dict) -> dict:
     """``Settings`` as the API returns it: the API key never leaves the server, only whether one is
-    stored (``status.assist.api_key`` is the one that also counts ``ANTHROPIC_API_KEY``)."""
+    stored (``status.assist.api_key`` is the one that also counts ``ANTHROPIC_API_KEY``). The read-only
+    machine fields (RAM, budget range, resolved low-memory mode) are added for the Settings form."""
     public = {k: v for k, v in settings.items() if k != "anthropic_api_key"}
     public["has_api_key"] = bool(settings.get("anthropic_api_key"))
+    memory = jobs.memory_info(settings)
+    public.update({k: memory[k] for k in _SETTINGS_MEMORY_FIELDS})
     return public
 
 

@@ -486,6 +486,10 @@ def apply_adapter(model: Any, info: AdapterInfo, *, part: str, scale: float = 1.
     module's parameters (``scale`` does not apply to them). Raises ``ValueError`` when a target is
     missing from the model or its shape disagrees. Work is per module, so peak memory is one
     dequantised weight plus its delta; the tensor file is memory-mapped by ``mx.load``.
+
+    An AR without ``lm_head`` (mlx-Yue low-memory mode loads the BF16 AR only to precompute the NAR
+    conditioning, ``conditioning_only``) skips ``lm_head`` targets: the head never touches the
+    conditioning, and the generating AR is a separate load that gets the full merge.
     """
     import mlx.core as mx
     import mlx.nn as nn
@@ -495,6 +499,8 @@ def apply_adapter(model: Any, info: AdapterInfo, *, part: str, scale: float = 1.
         raise ValueError(f"LoRA adapter {info.name!r} is unusable: {info.error}")
     factor = float(info.scale or 0.0) * check_scale(scale)
     targets = [t for t in info.loras if part_of(t.module) == part]
+    if part == "ar" and getattr(model, "lm_head", None) is None:
+        targets = [t for t in targets if t.module != "lm_head"]
     replacements = [r for r in info.replacements if part_of(r.module) == part]
     if not targets and not replacements:
         return 0

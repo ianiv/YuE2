@@ -11,6 +11,7 @@ import os
 
 os.environ.setdefault("MLX_ENABLE_TF32", "0")
 
+import math  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -21,8 +22,20 @@ MIN_ODE_STEPS, MAX_ODE_STEPS = 4, 64
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-DEFAULT_MEMORY_BUDGET_GIB = 24
+# mlx-Yue's GPU guard rejects a budget <= 5 GiB or above total RAM - 4 GiB (OS headroom), so the studio's
+# range is [6, total - 4] and the default is 24 GiB capped to the machine (12 GiB on a 16 GB Mac).
+MIN_MEMORY_BUDGET_GIB = 6
+PREFERRED_MEMORY_BUDGET_GIB = 24
+OS_HEADROOM_GIB = 4
 DEFAULT_REQUIRE_AC = False
+# Low-memory mode (mlx-Yue ``low_memory``): synthesis stages the models so only one of the AR / NAR is
+# resident (~7 GiB peak instead of ~11, bit-identical audio) and the guard's swap / available-memory
+# thresholds are relaxed. It costs model reloads on every Quality job, so ``auto`` only turns it on for
+# machines that need it: total RAM <= 24 GiB, or an effective budget below 14 GiB.
+LOW_MEMORY_MODES = ("auto", "on", "off")
+DEFAULT_LOW_MEMORY = "auto"
+LOW_MEMORY_AUTO_MAX_RAM_GIB = 24
+LOW_MEMORY_AUTO_MIN_BUDGET_GIB = 14
 # mlx-Yue ``fast_numerics``: batched CFG branches + native BF16 acoustic attention. Numerically
 # equivalent to the exact path but not bit-identical, so a seed made with one mode does not
 # reproduce under the other.
@@ -40,6 +53,54 @@ SHEETSAGE_REPO = "m-a-p/SheetSage2"
 SHEETSAGE_REVISION = "eab522a8168e8b8b8c4856bf8609cd86198f01fe"
 MERT_REPO = "m-a-p/MERT-v2-FullSong"
 MERT_REVISION = "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42"
+
+
+def machine_ram_gib() -> float:
+    """Total physical memory in GiB (the figure mlx-Yue's guard checks the budget against)."""
+    import psutil
+
+    return psutil.virtual_memory().total / 2**30
+
+
+def max_memory_budget_gib(total_gib: float | None = None) -> float:
+    """Largest budget the guard accepts here: ``floor(total RAM - 4 GiB)``, never below the 6 GiB floor.
+
+    Below 10 GiB of RAM the floor wins and the guard still refuses every job (such Macs are unsupported).
+    """
+    total = machine_ram_gib() if total_gib is None else float(total_gib)
+    return float(max(MIN_MEMORY_BUDGET_GIB, math.floor(total - OS_HEADROOM_GIB)))
+
+
+def default_memory_budget_gib(total_gib: float | None = None) -> float:
+    """``min(24, total RAM - 4)``: 24 GiB on 32 GB+ Macs, 20 on 24 GB, 12 on 16 GB."""
+    return float(min(PREFERRED_MEMORY_BUDGET_GIB, max_memory_budget_gib(total_gib)))
+
+
+def clamp_memory_budget(value, total_gib: float | None = None) -> float:
+    """``value`` limited to ``[6, max_memory_budget_gib()]``; a non-number becomes the machine default.
+
+    Stored settings may predate the machine cap (the old default was 24 GiB everywhere) or come from a
+    data directory moved between Macs, so every use of the setting goes through this.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        return default_memory_budget_gib(total_gib)
+    return float(min(max(float(value), MIN_MEMORY_BUDGET_GIB), max_memory_budget_gib(total_gib)))
+
+
+def resolve_low_memory(mode: str, memory_budget_gib: float, total_gib: float | None = None) -> bool:
+    """Effective low-memory flag: ``on`` / ``off`` as given; ``auto`` = RAM <= 24 GiB or budget < 14 GiB.
+
+    ``memory_budget_gib`` should already be the clamped (effective) budget. Unknown modes count as auto.
+    """
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    total = machine_ram_gib() if total_gib is None else float(total_gib)
+    return total <= LOW_MEMORY_AUTO_MAX_RAM_GIB or float(memory_budget_gib) < LOW_MEMORY_AUTO_MIN_BUDGET_GIB
+
+
+DEFAULT_MEMORY_BUDGET_GIB = default_memory_budget_gib()
 
 
 def _repo_root() -> Path:
@@ -187,7 +248,8 @@ class EngineOptions:
 
     ``loras`` is the ordered stack of ``(adapter name, scale)`` merged into the resident weights for
     the job (see ``yue2_studio.lora``); it is per job and never forces a pipeline rebuild, and neither
-    does ``fast_numerics`` (read by the pipeline on every call).
+    does ``fast_numerics`` (read by the pipeline on every call). ``low_memory`` is the *resolved* flag
+    (``resolve_low_memory``); mlx-Yue fixes it at construction, so it is part of ``build_key``.
     """
 
     precision: str = "bf16"
@@ -197,6 +259,7 @@ class EngineOptions:
     preset: str = "quality"
     loras: LoraStack = ()
     fast_numerics: bool = DEFAULT_FAST_NUMERICS
+    low_memory: bool = False
 
     def __post_init__(self):
         if self.precision not in PRECISIONS:
@@ -208,7 +271,7 @@ class EngineOptions:
     @property
     def build_key(self) -> tuple:
         """Fields that require a pipeline rebuild when they change."""
-        return (self.precision, float(self.memory_budget_gib), bool(self.require_ac))
+        return (self.precision, float(self.memory_budget_gib), bool(self.require_ac), bool(self.low_memory))
 
 
 @dataclass(frozen=True)
@@ -236,6 +299,7 @@ def resolve_preset(
     require_ac: bool = DEFAULT_REQUIRE_AC,
     loras=None,
     fast_numerics: bool = DEFAULT_FAST_NUMERICS,
+    low_memory: bool = False,
 ) -> EngineOptions:
     preset = PRESETS.get(name)
     if preset is None:
@@ -254,6 +318,7 @@ def resolve_preset(
         preset=preset.name,
         loras=normalise_loras(loras),
         fast_numerics=bool(fast_numerics),
+        low_memory=bool(low_memory),
     )
 
 

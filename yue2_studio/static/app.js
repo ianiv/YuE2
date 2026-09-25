@@ -22,7 +22,7 @@ async function refreshStatus() {
     const e = app.status.engine, q = app.status.queue;
     pill.dataset.state = e.state;
     pill.querySelector(".txt").textContent = e.state + (e.precision ? ` · ${e.precision}` : "") + (e.memory_gib ? ` · ${e.memory_gib.toFixed(1)} GiB` : "");
-    pill.title = `Engine ${e.state}` + (q.running ? `, running ${q.running.slice(0, 8)}` : "");
+    pill.title = `Engine ${e.state}` + (e.low_memory ? ", low-memory mode" : "") + (q.running ? `, running ${q.running.slice(0, 8)}` : "");
     const n = (q.queued || 0) + (q.running ? 1 : 0);
     count.textContent = String(n); count.hidden = n === 0;
   } catch (e) {

@@ -14,7 +14,7 @@ import pytest
 from conftest import BASE, Api
 
 from yue2_studio import api as api_module
-from yue2_studio import assist, audio
+from yue2_studio import assist, audio, config
 from yue2_studio.fake import FakeEngine
 
 JOB_KEYS = {"id", "kind", "status", "group_id", "parent_id", "preset", "precision", "ode_steps", "loras",
@@ -59,14 +59,19 @@ async def test_status_shape(client, home):
     r = await client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"engine", "queue", "presets", "models", "cover", "hum", "loras", "assist", "ffmpeg",
-                         "fake", "version"}
+    assert set(body) == {"engine", "memory", "queue", "presets", "models", "cover", "hum", "loras", "assist",
+                         "ffmpeg", "fake", "version"}
     assert set(body["assist"]) == {"provider", "cli", "api_key", "model", "reasons"}
     assert body["assist"]["provider"] in ("cli", "api", None)
     assert isinstance(body["assist"]["cli"], bool) and isinstance(body["assist"]["api_key"], bool)
     assert body["hum"] == {"available": True, "reasons": [], "adapters": []}
     assert body["engine"] == {"state": "cold", "precision": None, "memory_gib": None, "current_job_id": None,
-                              "loras": []}
+                              "loras": [], "low_memory": None}
+    assert body["memory"] == {"machine_ram_gib": 48.0, "min_memory_budget_gib": 6.0,
+                              "max_memory_budget_gib": 44.0,
+                              "memory_budget_gib": config.DEFAULT_MEMORY_BUDGET_GIB, "low_memory": "auto",
+                              "low_memory_effective": config.resolve_low_memory(
+                                  "auto", config.DEFAULT_MEMORY_BUDGET_GIB)}
     assert body["loras"] == {"dir": str(home / "models" / "loras"), "adapters": []}
     assert body["queue"] == {"queued": 0, "running": None}
     assert [p["name"] for p in body["presets"]] == ["quality", "fast", "custom"]
@@ -95,9 +100,16 @@ async def test_status_reflects_queue_and_engine(client, api, app):
     assert body["engine"]["state"] == "ready" and body["engine"]["memory_gib"] > 0
 
 
-DEFAULT_PUBLIC_SETTINGS = {"default_preset": "quality", "memory_budget_gib": 24, "require_ac": False,
-                           "fast_numerics": True, "theme": "system", "prune_uploads_days": None,
-                           "assist_provider": "auto", "assist_model": "", "has_api_key": False}
+DEFAULT_PUBLIC_SETTINGS = {"default_preset": "quality",
+                           "memory_budget_gib": config.DEFAULT_MEMORY_BUDGET_GIB, "require_ac": False,
+                           "fast_numerics": True, "low_memory": "auto", "theme": "system",
+                           "prune_uploads_days": None, "assist_provider": "auto", "assist_model": "",
+                           "has_api_key": False,
+                           # read-only machine fields (the tests pin a 48 GB Mac, see conftest.machine_ram)
+                           "machine_ram_gib": 48.0, "min_memory_budget_gib": 6.0,
+                           "max_memory_budget_gib": 44.0,
+                           "low_memory_effective": config.resolve_low_memory(
+                               "auto", config.DEFAULT_MEMORY_BUDGET_GIB, 48.0)}
 
 
 async def test_settings_get_and_partial_put(client, monkeypatch):
@@ -143,6 +155,37 @@ async def test_settings_api_key_is_write_only(client, app, monkeypatch):
         assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error", bad
 
 
+async def test_settings_and_status_on_a_16_gb_mac(client, api, app, machine_ram):
+    """Budget capped to total RAM - 4, a stale 24 GiB clamped, low-memory auto -> on, recorded per job."""
+    await client.put("/api/settings", json={"memory_budget_gib": 24})  # saved on the "48 GB" host
+    machine_ram(16)
+    body = (await client.get("/api/settings")).json()
+    assert body["memory_budget_gib"] == 12.0 and body["low_memory"] == "auto"
+    assert body["machine_ram_gib"] == 16.0 and body["min_memory_budget_gib"] == 6.0
+    assert body["max_memory_budget_gib"] == 12.0
+    assert body["low_memory_effective"] is True
+    r = await client.put("/api/settings", json={"memory_budget_gib": 12.5})
+    assert r.status_code == 400 and "at most 12 GiB" in r.json()["error"]["message"]
+    status = (await client.get("/api/status")).json()
+    assert status["memory"] == {"machine_ram_gib": 16.0, "min_memory_budget_gib": 6.0,
+                                "max_memory_budget_gib": 12.0, "memory_budget_gib": 12.0,
+                                "low_memory": "auto", "low_memory_effective": True}
+    assert status["engine"]["low_memory"] is None  # cold
+    job = await api.wait((await api.create())["id"])
+    summary = json.loads((app.state.paths.songs_dir / job["id"] / "summary.json").read_text())
+    assert summary["low_memory"] is True and summary["fast_numerics"] is True
+    assert (await client.get("/api/status")).json()["engine"]["low_memory"] is True
+    # turning it off rebuilds the (fake) pipeline and is recorded on the next job
+    engine = app.state.engine
+    pipeline = engine.pipeline
+    r = await client.put("/api/settings", json={"low_memory": "off"})
+    assert r.json()["low_memory"] == "off" and r.json()["low_memory_effective"] is False
+    job = await api.wait((await api.create())["id"])
+    summary = json.loads((app.state.paths.songs_dir / job["id"] / "summary.json").read_text())
+    assert summary["low_memory"] is False and engine.pipeline is not pipeline
+    assert (await client.get("/api/status")).json()["engine"]["low_memory"] is False
+
+
 @pytest.mark.parametrize(("patch", "ok"), [
     ({"memory_budget_gib": 6}, True), ({"memory_budget_gib": 5.99}, False),
     ({"memory_budget_gib": 4}, False),
@@ -151,6 +194,8 @@ async def test_settings_api_key_is_write_only(client, app, monkeypatch):
     ({"default_preset": "fast"}, True), ({"default_preset": "ultra"}, False),
     ({"require_ac": True}, True), ({"require_ac": 3}, False),
     ({"fast_numerics": False}, True), ({"fast_numerics": 3}, False),
+    ({"low_memory": "on"}, True), ({"low_memory": "off"}, True), ({"low_memory": "maybe"}, False),
+    ({"low_memory": True}, False),
     ({"theme": "light"}, True), ({"theme": "neon"}, False),
     ({"prune_uploads_days": 1}, True), ({"prune_uploads_days": 365}, True),
     ({"prune_uploads_days": None}, True),
@@ -163,7 +208,10 @@ async def test_settings_validation_bounds(client, patch, ok):
     r = await client.put("/api/settings", json=patch)
     if ok:
         assert r.status_code == 200, r.text
-        assert r.json() == {**before, **patch}
+        body = r.json()
+        effective = body.pop("low_memory_effective")  # derived: auto follows the budget
+        assert body == {k: v for k, v in {**before, **patch}.items() if k != "low_memory_effective"}
+        assert effective == config.resolve_low_memory(body["low_memory"], body["memory_budget_gib"])
     else:
         assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
         assert next(iter(patch)) in r.json()["error"]["message"]

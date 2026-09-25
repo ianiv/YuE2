@@ -2,6 +2,37 @@
 
 All notable changes to YuE2 Studio. Dates are when the work was merged to `main`.
 
+## 2026-09-25 — Low-memory mode for 16 GB Macs
+
+### Added
+- **Low-memory mode** (Settings → *Low-memory mode*: Auto / On / Off, default Auto). Uses mlx-Yue's
+  `low_memory` pipeline: synthesis precomputes the acoustic conditioning with the BF16 AR, releases it and
+  only then loads the acoustic model, so only one of AR / NAR is resident and a song peaks at ~7 GiB
+  instead of ~11 GiB (estimate, to be measured) with bit-identical audio; the guard's swap /
+  available-memory thresholds are relaxed too. The price is reloading the models every job (≈0.2–2.5 s
+  per Quality song), so *Auto* turns it on only for Macs with 24 GB or less or a budget below 14 GiB —
+  bigger Macs behave exactly as before. Hum-to-song stages its hum-conditioned synthesis the same way, and
+  LoRA adapters are merged into every reload (the conditioning-only AR skips `lm_head`, which never affects
+  conditioning). Needs the low-memory mlx-Yue: with an older one installed, a job with the mode on fails
+  with a message to run `uv sync` or turn the mode off (with it off nothing changes).
+- **API**: `Settings.low_memory` plus read-only `low_memory_effective`, `machine_ram_gib`,
+  `min_memory_budget_gib` / `max_memory_budget_gib`; `status.memory` (the same machine and resolved
+  values) and `status.engine.low_memory` (the resident pipeline's mode, shown in the Settings engine panel
+  and the engine pill's tooltip). Each song's `summary.json` records `low_memory`. `scripts/mock_api.py`
+  (`--ram-gib 16` simulates a 16 GB Mac) and the `--fake` engine follow the same contract;
+  `scripts/smoke.py` / `hum_smoke.py` take `--low-memory` and `smoke.py` prints the MLX peak.
+
+### Changed
+- **The memory budget range is the machine's**: 6 GiB up to total RAM − 4 GiB (e.g. 6–12 on 16 GB,
+  6–44 on 48 GB) in the API and the Settings form, whose hint explains the cap. 16 GB Macs are now
+  supported (README requirements).
+
+### Fixed
+- **Every job failed on 16 and 24 GB Macs until the budget was lowered by hand.** The default budget was
+  24 GiB everywhere, but mlx-Yue's guard rejects a budget above total RAM − 4 GiB. The default is now
+  `min(24, total RAM − 4)` (12 GiB on 16 GB, 20 on 24 GB), and a larger budget already saved (or carried
+  over from a bigger Mac) is clamped to the cap when read and when a job starts, instead of failing.
+
 ## 2026-09-22 — New takes are titled after their track
 
 ### Changed

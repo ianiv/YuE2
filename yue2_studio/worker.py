@@ -357,9 +357,11 @@ class Worker:
             used = memory.get("mlx_active_bytes") or memory.get("rss_bytes") or 0
             memory_gib = round(used / 2**30, 2)
         loras = getattr(self.engine, "loras", None)
+        low_memory = getattr(self.engine, "low_memory", None)
         return {"state": state, "precision": precision if state != "cold" else None,
                 "memory_gib": memory_gib, "current_job_id": self.current_job_id,
-                "loras": list(loras) if loras and state != "cold" else []}
+                "loras": list(loras) if loras and state != "cold" else [],
+                "low_memory": None if state == "cold" or low_memory is None else bool(low_memory)}
 
     def _sample_memory(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -440,7 +442,8 @@ class Worker:
             if cancel.is_set():
                 raise InterruptedError("Cancelled before start")
             engine = self.engine
-            if engine.state == "cold" or engine.precision != options.precision:
+            if (engine.state == "cold" or engine.precision != options.precision
+                    or getattr(engine, "low_memory", options.low_memory) != options.low_memory):
                 self._publish(job.id, status_event(job.id, "running",
                                                    f"loading models ({options.precision})…", stage="load"))
             engine.ensure(options, on_event)
